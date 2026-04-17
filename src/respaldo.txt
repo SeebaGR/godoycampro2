@@ -1,0 +1,15 @@
+Directus GetAPI upsert ERROR: {"op":"POST","collection":"vehicle_detection_getapi2","detection_id":"7011","status":400,"message":"Value \"7011\" for field \"detection_id\" in collection \"vehicle_detection_getapi2\" has to be unique.","url":"https://pedro-valdivia-cam1-directus.inslyw.easypanel.host/items/vehicle_detection_getapi2","payload":{"errors":[{"message":"Value \"7011\" for field \"detection_id\" in collection \"vehicle_detection_getapi2\" has to be unique.","extensions":{"collection":"vehicle_detection_getapi2","field":"detection_id","value":7011,"code":"RECORD_NOT_UNIQUE"}}]}}
+Directus GetAPI upsert: {"op":"POST","collection":"vehicle_detection_getapi2","detection_id":"7011","has_getapi":true,"status":"ok","attempts":1,"upstream_status":200}
+Enriquecimiento GetAPI persistido en Directus para id: 7011
+Iniciando enriquecimiento GetAPI para detección: 7010 patente: SRTY22
+Consultando GetAPI: https://chile.getapi.cl/v1/vehicles/plate/SRTY22
+Consultando GetAPI: https://chile.getapi.cl/v1/vehicles/appraisal/SRTY22
+Directus GetAPI upsert: {"op":"POST","collection":"vehicle_detection_getapi2","detection_id":"7010","has_getapi":true,"status":"ok","attempts":1,"upstream_status":200}
+Directus GetAPI upsert: {"op":"POST","collection":"vehicle_detection_getapi2","detection_id":"7010","has_getapi":true,"status":"ok","attempts":1,"upstream_status":200}
+Directus GetAPI upsert ERROR: {"op":"POST","collection":"vehicle_detection_getapi2","detection_id":"7010","status":400,"message":"Value \"7010\" for field \"detection_id\" in collection \"vehicle_detection_getapi2\" has to be unique.","url":"https://pedro-valdivia-cam1-directus.inslyw.easypanel.host/items/vehicle_detection_getapi2","payload":{"errors":[{"message":"Value \"7010\" for field \"detection_id\" in collection \"vehicle_detection_getapi2\" has to be unique.","extensions":{"collection":"vehicle_detection_getapi2","field":"detection_id","value":7010,"code":"RECORD_NOT_UNIQUE"}}]}}
+Enriquecimiento GetAPI persistido en Directus para id: 7010
+
+
+Directus GetAPI upsert: {"op":"POST","collection":"vehicle_detection_getapi2","detection_id":"7036","has_getapi":true,"status":"ok","attempts":1,"upstream_status":200}
+Iniciando enriquecimiento GetAPI para detección: 7035 patente: FLXS70
+Consultando GetAPI: https://chile.getapi.cl/v1/vehicles/plate/FLXS70
