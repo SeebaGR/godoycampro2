@@ -679,6 +679,74 @@ async function uploadImageBytes(bytes, { contentType, filename, title } = {}) {
   return { fileId, assetUrl: `${baseUrl}/assets/${fileId}` };
 }
 
+async function getDashboardStatsByKey(key) {
+  const safeKey = String(key || '').trim();
+  if (!safeKey) return null;
+  const query = {
+    limit: 1,
+    sort: '-date_updated,-id',
+    fields: 'id,key,data,date_created,date_updated',
+    'filter[key][_eq]': safeKey
+  };
+  const payload = await directusRequest('GET', `/items/${encodeURIComponent('dashboard_stats')}`, { query });
+  const rows = Array.isArray(payload?.data) ? payload.data : [];
+  return rows[0] || null;
+}
+
+async function upsertDashboardStatsByKey(key, data) {
+  const safeKey = String(key || '').trim();
+  if (!safeKey) return null;
+  const existing = await getDashboardStatsByKey(safeKey).catch(() => null);
+  const body = { key: safeKey, data: data ?? null };
+  if (existing?.id) {
+    const payload = await directusRequest('PATCH', `/items/${encodeURIComponent('dashboard_stats')}/${encodeURIComponent(existing.id)}`, {
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    return payload?.data || null;
+  }
+  const payload = await directusRequest('POST', `/items/${encodeURIComponent('dashboard_stats')}`, {
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  return payload?.data || null;
+}
+
+async function listGetApiSince({ afterId, limit, offset, onlySuccess } = {}) {
+  const schema = await resolveGetApiSchema();
+  if (!schema?.ok) return { data: [], pagination: { offset: 0, limit: 0, hasMore: false, nextOffset: null } };
+  const safeLimit = Math.min(200, Math.max(1, Number.parseInt(limit ?? '100', 10) || 100));
+  const safeOffset = Math.max(0, Number.parseInt(offset ?? '0', 10) || 0);
+  const hasAnyPayloadField = Boolean(schema.payloadField || schema.vehicleField || schema.appraisalField);
+  const query = {
+    limit: safeLimit + 1,
+    offset: safeOffset,
+    sort: 'id',
+    fields: hasAnyPayloadField
+      ? ['id', schema.detectionField, schema.payloadField, schema.vehicleField, schema.appraisalField, schema.plateField, schema.fetchedAtField, schema.statusField, schema.attemptsField, schema.nextRetryAtField, schema.upstreamStatusField, schema.reasonField, schema.messageField].filter(Boolean).join(',')
+      : '*'
+  };
+  const after = Number.isFinite(Number(afterId)) ? Number(afterId) : null;
+  if (after != null) query['filter[id][_gt]'] = String(after);
+  if (onlySuccess) {
+    const statusField = schema.statusField || 'status';
+    query[`filter[${statusField}][_eq]`] = 'ok';
+  }
+  const payload = await directusRequest('GET', `/items/${encodeURIComponent(schema.collection)}`, { query });
+  const rows = Array.isArray(payload?.data) ? payload.data : [];
+  const hasMore = rows.length > safeLimit;
+  const sliced = hasMore ? rows.slice(0, safeLimit) : rows;
+  return {
+    data: sliced,
+    pagination: {
+      offset: safeOffset,
+      limit: safeLimit,
+      hasMore,
+      nextOffset: hasMore ? safeOffset + safeLimit : null
+    }
+  };
+}
+
 module.exports = {
   getDirectusConfig,
   getDirectusGetApiCollection,
@@ -699,5 +767,8 @@ module.exports = {
   getLatestTimestampByPlate,
   createDetection,
   updateDetectionById,
-  uploadImageBytes
+  uploadImageBytes,
+  getDashboardStatsByKey,
+  upsertDashboardStatsByKey,
+  listGetApiSince
 };

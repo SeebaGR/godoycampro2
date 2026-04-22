@@ -7,6 +7,7 @@ let topBrandsCache = { atMs: 0, okCount: null, data: [] };
 let topComunasCache = { atMs: 0, okCount: null, data: [] };
 let rmGeoJsonCache = { atMs: 0, body: null };
 let rmStatsCache = { atMs: 0, okCount: null, data: [] };
+let dashboardStatsRefreshPromise = null;
 
 function getDateTimePartsInTimeZone(date, timeZone) {
   const dtf = new Intl.DateTimeFormat('en-US', {
@@ -56,6 +57,17 @@ function addDaysYmd({ year, month, day }, daysToAdd) {
   return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
 }
 
+function safeJsonParse(value) {
+  if (value == null) return null;
+  if (typeof value === 'object') return value;
+  if (typeof value !== 'string') return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
 router.get('/', async (req, res) => {
   try {
     const { collection } = directus.getDirectusConfig();
@@ -69,6 +81,13 @@ router.get('/', async (req, res) => {
       } catch {
         return null;
       }
+    };
+
+    const normalizeUpperText = (value) => {
+      if (value == null) return null;
+      const v = String(value).trim();
+      if (!v) return null;
+      return v.toUpperCase().replace(/\s+/g, ' ').trim();
     };
 
     const escapeHtml = (value) => {
@@ -150,7 +169,7 @@ router.get('/', async (req, res) => {
         null;
 
       if (!brand) return null;
-      return brand.toUpperCase().replace(/\s+/g, ' ').trim();
+      return normalizeUpperText(brand);
     };
 
     const extractComuna = (row) => {
@@ -176,7 +195,7 @@ router.get('/', async (req, res) => {
         null;
 
       if (!comuna) return null;
-      return comuna.toUpperCase().replace(/\s+/g, ' ').trim();
+      return normalizeUpperText(comuna);
     };
 
     const extractPlanta = (row) => {
@@ -201,7 +220,283 @@ router.get('/', async (req, res) => {
       const cod = pickDisplayText(pr?.codPrt) || pickDisplayText(pr?.cod_prt);
       const pretty = (cod && name) ? (cod + ' · ' + name) : (name || cod);
       if (!pretty) return null;
-      return String(pretty).toUpperCase().replace(/\s+/g, ' ').trim();
+      return normalizeUpperText(pretty);
+    };
+
+    const statsKey = (typeof process.env.HOME_DASHBOARD_STATS_KEY === 'string' && process.env.HOME_DASHBOARD_STATS_KEY.trim())
+      ? process.env.HOME_DASHBOARD_STATS_KEY.trim()
+      : 'home_v1';
+    const statsTtlMs = Math.max(0, Number.parseInt(process.env.HOME_DASHBOARD_STATS_TTL_MS ?? '300000', 10) || 300000);
+    const deltaMaxScan = Math.max(1000, Number.parseInt(process.env.HOME_DASHBOARD_DELTA_MAX_SCAN ?? '50000', 10) || 50000);
+    const fullMaxScan = Math.max(10000, Number.parseInt(process.env.HOME_DASHBOARD_FULL_MAX_SCAN ?? '400000', 10) || 400000);
+
+    const readPersistedStats = async () => {
+      const row = await directus.getDashboardStatsByKey(statsKey);
+      const data = safeJsonParse(row?.data);
+      return { row, data };
+    };
+
+    const writePersistedStats = async (data) => {
+      return directus.upsertDashboardStatsByKey(statsKey, data);
+    };
+
+    const objectInc = (obj, key, delta = 1) => {
+      if (!obj || typeof obj !== 'object') return;
+      const k = String(key || '').trim();
+      if (!k) return;
+      obj[k] = (Number(obj[k]) || 0) + (Number(delta) || 0);
+    };
+
+    const objectIncNested = (obj, outerKey, innerKey, delta = 1) => {
+      if (!obj || typeof obj !== 'object') return;
+      const ok = String(outerKey || '').trim();
+      const ik = String(innerKey || '').trim();
+      if (!ok || !ik) return;
+      if (!obj[ok] || typeof obj[ok] !== 'object') obj[ok] = {};
+      obj[ok][ik] = (Number(obj[ok][ik]) || 0) + (Number(delta) || 0);
+    };
+
+    const computeDerived = ({ brandCounts, comunaCounts, plantsByComuna }) => {
+      const brands = Object.entries(brandCounts || {})
+        .map(([brand, count]) => ({ brand, count: Number(count) || 0 }))
+        .filter((x) => x.brand && x.count > 0)
+        .sort((a, b) => b.count - a.count)
+        .map((x, idx) => ({ rank: idx + 1, brand: x.brand, count: x.count }));
+
+      const rmStats = Object.entries(comunaCounts || {})
+        .map(([comuna, count]) => {
+          const plantsMap = (plantsByComuna && typeof plantsByComuna === 'object' && plantsByComuna[comuna] && typeof plantsByComuna[comuna] === 'object')
+            ? plantsByComuna[comuna]
+            : {};
+          const plants = Object.entries(plantsMap)
+            .map(([name, c]) => ({ name, count: Number(c) || 0 }))
+            .filter((x) => x.name && x.count > 0)
+            .sort((a, b) => b.count - a.count)
+            .slice(0, 3);
+          return { comuna, count: Number(count) || 0, plants };
+        })
+        .filter((x) => x.comuna && x.count > 0)
+        .sort((a, b) => b.count - a.count);
+
+      const topComunas = rmStats.slice(0, 10).map((x, idx) => ({ rank: idx + 1, comuna: x.comuna, count: x.count }));
+      return { brands, rmStats, topComunas };
+    };
+
+    const computeAndPersistStats = async (previousData) => {
+      const computedAtIso = new Date().toISOString();
+
+      let totalVehicles = 0;
+      try {
+        const count = await directus.countItems(collection);
+        if (Number.isFinite(count)) totalVehicles = Number(count);
+      } catch {
+        totalVehicles = 0;
+      }
+
+      let getApiStats = null;
+      let totalProcesados = 0;
+      let totalPendientes = 0;
+      let totalInvalidPlates = 0;
+      try {
+        getApiStats = await directus.getGetApiStats();
+        if (getApiStats?.counts && Number.isFinite(getApiStats.counts.ok)) totalProcesados = Number(getApiStats.counts.ok);
+        if (getApiStats?.counts && Number.isFinite(getApiStats.counts.pending)) totalPendientes = Number(getApiStats.counts.pending);
+        if (getApiStats?.counts && Number.isFinite(getApiStats.counts.invalid_plate)) totalInvalidPlates = Number(getApiStats.counts.invalid_plate);
+      } catch {
+        getApiStats = null;
+      }
+
+      let totalTransitadosHoy = 0;
+      try {
+        const timeZone = (typeof process.env.APP_TIMEZONE === 'string' && process.env.APP_TIMEZONE.trim()) || 'America/Santiago';
+        const now = new Date();
+        const ymd = getDateTimePartsInTimeZone(now, timeZone);
+        const startUtc = zonedTimeToUtc({ year: ymd.year, month: ymd.month, day: ymd.day, hour: 0, minute: 0, second: 0 }, timeZone);
+        const next = addDaysYmd({ year: ymd.year, month: ymd.month, day: ymd.day }, 1);
+        const nextStartUtc = zonedTimeToUtc({ year: next.year, month: next.month, day: next.day, hour: 0, minute: 0, second: 0 }, timeZone);
+        const endUtc = new Date(nextStartUtc.getTime() - 1);
+        totalTransitadosHoy = await directus.countItems(collection, {
+          'filter[timestamp][_gte]': startUtc.toISOString(),
+          'filter[timestamp][_lte]': endUtc.toISOString()
+        });
+        if (!Number.isFinite(totalTransitadosHoy)) totalTransitadosHoy = 0;
+      } catch {
+        totalTransitadosHoy = 0;
+      }
+
+      const prev = previousData && typeof previousData === 'object' ? previousData : null;
+      const prevAgg = prev?.aggregates && typeof prev.aggregates === 'object' ? prev.aggregates : null;
+      const prevProgress = prev?.progress && typeof prev.progress === 'object' ? prev.progress : null;
+      const prevOkCount = Number(prevProgress?.okCount ?? prev?.okCount ?? NaN);
+      const prevMaxId = Number(prevProgress?.getapiMaxId ?? prevProgress?.getapi_max_id ?? prev?.getapi_max_id ?? NaN);
+
+      let brandCounts = prevAgg?.brandCounts && typeof prevAgg.brandCounts === 'object' ? { ...prevAgg.brandCounts } : {};
+      let comunaCounts = prevAgg?.comunaCounts && typeof prevAgg.comunaCounts === 'object' ? { ...prevAgg.comunaCounts } : {};
+      let plantsByComuna = prevAgg?.plantsByComuna && typeof prevAgg.plantsByComuna === 'object' ? JSON.parse(JSON.stringify(prevAgg.plantsByComuna)) : {};
+
+      const canDelta = Number.isFinite(prevOkCount) && prevOkCount >= 0 && Number.isFinite(prevMaxId) && prevMaxId > 0;
+      const deltaNeeded = canDelta ? (totalProcesados - prevOkCount) : 0;
+      let usedDelta = false;
+      let nextMaxId = Number.isFinite(prevMaxId) ? prevMaxId : 0;
+
+      if (canDelta && deltaNeeded > 0) {
+        let offset = 0;
+        let scanned = 0;
+        while (true) {
+          const page = await directus.listGetApiSince({ afterId: prevMaxId, offset, limit: 200, onlySuccess: true }).catch(() => null);
+          const rows = Array.isArray(page?.data) ? page.data : [];
+          for (const row of rows) {
+            const idNum = Number(row?.id);
+            if (Number.isFinite(idNum)) nextMaxId = Math.max(nextMaxId, idNum);
+            const brand = extractBrand(row);
+            if (brand) objectInc(brandCounts, brand, 1);
+            const comuna = extractComuna(row);
+            if (comuna) {
+              objectInc(comunaCounts, comuna, 1);
+              const planta = extractPlanta(row);
+              if (planta) objectIncNested(plantsByComuna, comuna, planta, 1);
+            }
+            scanned += 1;
+            if (scanned >= deltaMaxScan) break;
+          }
+          const hasMore = Boolean(page?.pagination?.hasMore);
+          const nextOffset = page?.pagination?.nextOffset;
+          if (scanned >= deltaMaxScan || rows.length === 0 || !hasMore || nextOffset == null) break;
+          offset = nextOffset;
+        }
+        usedDelta = scanned > 0;
+        if (!usedDelta) {
+          brandCounts = {};
+          comunaCounts = {};
+          plantsByComuna = {};
+          nextMaxId = 0;
+        }
+      }
+
+      if (!usedDelta) {
+        const scanLimit = Math.min(fullMaxScan, Math.max(0, totalProcesados));
+        const pageSize = 100;
+        let fetched = 0;
+        let maxIdSeen = 0;
+        brandCounts = {};
+        comunaCounts = {};
+        plantsByComuna = {};
+        for (let page = 1; page <= 4000; page += 1) {
+          const result = await directus.listGetApiPage({ page, limit: pageSize, onlySuccess: true }).catch(() => null);
+          const rows = Array.isArray(result?.data) ? result.data : [];
+          for (const row of rows) {
+            const idNum = Number(row?.id);
+            if (Number.isFinite(idNum)) maxIdSeen = Math.max(maxIdSeen, idNum);
+            const brand = extractBrand(row);
+            if (brand) objectInc(brandCounts, brand, 1);
+            const comuna = extractComuna(row);
+            if (comuna) {
+              objectInc(comunaCounts, comuna, 1);
+              const planta = extractPlanta(row);
+              if (planta) objectIncNested(plantsByComuna, comuna, planta, 1);
+            }
+            fetched += 1;
+            if (fetched >= scanLimit) break;
+          }
+          const hasMore = Boolean(result?.pagination?.hasMore);
+          if (fetched >= scanLimit || !hasMore || rows.length === 0) break;
+        }
+        nextMaxId = maxIdSeen;
+      }
+
+      const derived = computeDerived({ brandCounts, comunaCounts, plantsByComuna });
+
+      const data = {
+        version: 1,
+        computed_at: computedAtIso,
+        totals: {
+          totalVehicles,
+          totalProcesados,
+          totalPendientes,
+          totalInvalidPlates,
+          totalTransitadosHoy
+        },
+        getApiStats,
+        topBrands: derived.brands,
+        topComunas: derived.topComunas,
+        rmStatsForUi: derived.rmStats,
+        progress: {
+          okCount: totalProcesados,
+          getapiMaxId: nextMaxId
+        },
+        aggregates: {
+          brandCounts,
+          comunaCounts,
+          plantsByComuna
+        }
+      };
+
+      await writePersistedStats(data);
+      return data;
+    };
+
+    const triggerBackgroundRefresh = (previousData) => {
+      if (dashboardStatsRefreshPromise) return;
+      dashboardStatsRefreshPromise = (async () => {
+        try {
+          const latest = await readPersistedStats().catch(() => ({ data: null }));
+          const prev = latest?.data && typeof latest.data === 'object' ? latest.data : previousData;
+          await computeAndPersistStats(prev);
+        } finally {
+          dashboardStatsRefreshPromise = null;
+        }
+      })();
+    };
+
+    let cached = null;
+    try {
+      cached = await readPersistedStats();
+    } catch {
+      cached = { data: null };
+    }
+
+    const cachedData = cached?.data && typeof cached.data === 'object' ? cached.data : null;
+    const cachedAtMs = cachedData?.computed_at ? new Date(cachedData.computed_at).getTime() : 0;
+    const hasCached = Boolean(cachedData && cachedData.totals && typeof cachedData.totals === 'object');
+    const isFresh = statsTtlMs > 0 && cachedAtMs > 0 && (Date.now() - cachedAtMs < statsTtlMs);
+
+    if (!isFresh) triggerBackgroundRefresh(cachedData);
+
+    if (!hasCached) {
+      const seed = {
+        version: 1,
+        computed_at: new Date(0).toISOString(),
+        totals: {
+          totalVehicles: 0,
+          totalProcesados: 0,
+          totalPendientes: 0,
+          totalInvalidPlates: 0,
+          totalTransitadosHoy: 0
+        },
+        getApiStats: null,
+        topBrands: [],
+        topComunas: [],
+        rmStatsForUi: [],
+        progress: { okCount: 0, getapiMaxId: 0 },
+        aggregates: { brandCounts: {}, comunaCounts: {}, plantsByComuna: {} }
+      };
+      writePersistedStats(seed).catch(() => {});
+      triggerBackgroundRefresh(seed);
+    }
+
+    const viewData = hasCached ? cachedData : {
+      totals: {
+        totalVehicles: 0,
+        totalProcesados: 0,
+        totalPendientes: 0,
+        totalInvalidPlates: 0,
+        totalTransitadosHoy: 0
+      },
+      getApiStats: null,
+      topBrands: [],
+      topComunas: [],
+      rmStatsForUi: [],
+      computed_at: null
     };
 
     const getTopBrands = async ({ limit = 10, okCount = null } = {}) => {
@@ -340,53 +635,18 @@ router.get('/', async (req, res) => {
       return computed;
     };
 
-    // 1) Vehículos transitados total (vehicle_detections)
-    let totalVehicles = 0;
-    try {
-      const count = await directus.countItems(collection);
-      if (Number.isFinite(count)) totalVehicles = Number(count);
-    } catch (e) {
-      console.warn('No se pudo obtener el total de vehículos transitados:', e.message);
-    }
-
-    // 2) Total procesados en vehicle_detection_getapi2 (status ok)
-    let getApiStats = null;
-    let totalProcesados = 0;
-    let totalPendientes = 0;
-    let totalInvalidPlates = 0;
-    try {
-      getApiStats = await directus.getGetApiStats();
-      if (getApiStats && getApiStats.counts && Number.isFinite(getApiStats.counts.ok)) {
-        totalProcesados = Number(getApiStats.counts.ok);
-      }
-      if (getApiStats && getApiStats.counts && Number.isFinite(getApiStats.counts.pending)) {
-        totalPendientes = Number(getApiStats.counts.pending);
-      }
-      if (getApiStats && getApiStats.counts && Number.isFinite(getApiStats.counts.invalid_plate)) {
-        totalInvalidPlates = Number(getApiStats.counts.invalid_plate);
-      }
-    } catch (e) {
-      console.warn('No se pudo obtener estadísticas GetAPI:', e.message);
-    }
-
-    let topBrands = [];
-    try {
-      topBrands = await getTopBrands({
-        limit: 10,
-        okCount: totalProcesados
-      });
-    } catch (e) {
-      console.warn('No se pudo obtener TOP marcas:', e.message);
-    }
-
-    let rmStatsForUi = [];
-    let topComunas = [];
-    try {
-      rmStatsForUi = await getRmComunaStats({ okCount: totalProcesados });
-      topComunas = rmStatsForUi.slice(0, 10).map((x, idx) => ({ rank: idx + 1, comuna: x.comuna, count: x.count }));
-    } catch (e) {
-      console.warn('No se pudo obtener TOP comunas:', e.message);
-    }
+    const totalsObj = viewData?.totals && typeof viewData.totals === 'object' ? viewData.totals : {};
+    const totalVehicles = Number(totalsObj.totalVehicles) || 0;
+    const totalProcesados = Number(totalsObj.totalProcesados) || 0;
+    const totalPendientes = Number(totalsObj.totalPendientes) || 0;
+    const totalInvalidPlates = Number(totalsObj.totalInvalidPlates) || 0;
+    const totalTransitadosHoy = Number(totalsObj.totalTransitadosHoy) || 0;
+    const getApiStats = viewData?.getApiStats ?? null;
+    const topBrands = Array.isArray(viewData?.topBrands) ? viewData.topBrands.slice(0, 10) : [];
+    const rmStatsForUi = Array.isArray(viewData?.rmStatsForUi) ? viewData.rmStatsForUi : [];
+    const topComunas = Array.isArray(viewData?.topComunas)
+      ? viewData.topComunas.slice(0, 10)
+      : rmStatsForUi.slice(0, 10).map((x, idx) => ({ rank: idx + 1, comuna: x.comuna, count: x.count }));
 
     const formatEsNumber = (n) => {
       const v = Number(n);
@@ -441,25 +701,6 @@ router.get('/', async (req, res) => {
           })
           .join('')
       : '';
-
-    // 3) Transitados Hoy (timestamp de vehicle_detections)
-    let totalTransitadosHoy = 0;
-    try {
-      const timeZone = (typeof process.env.APP_TIMEZONE === 'string' && process.env.APP_TIMEZONE.trim()) || 'America/Santiago';
-      const now = new Date();
-      const ymd = getDateTimePartsInTimeZone(now, timeZone);
-      const startUtc = zonedTimeToUtc({ year: ymd.year, month: ymd.month, day: ymd.day, hour: 0, minute: 0, second: 0 }, timeZone);
-      const next = addDaysYmd({ year: ymd.year, month: ymd.month, day: ymd.day }, 1);
-      const nextStartUtc = zonedTimeToUtc({ year: next.year, month: next.month, day: next.day, hour: 0, minute: 0, second: 0 }, timeZone);
-      const endUtc = new Date(nextStartUtc.getTime() - 1);
-      totalTransitadosHoy = await directus.countItems(collection, {
-        'filter[timestamp][_gte]': startUtc.toISOString(),
-        'filter[timestamp][_lte]': endUtc.toISOString()
-      });
-      if (!Number.isFinite(totalTransitadosHoy)) totalTransitadosHoy = 0;
-    } catch (e) {
-      console.warn('No se pudo obtener el total de transitados hoy:', e.message);
-    }
 
     const title = 'Home - Dashboard';
     const getApiCalls = getApiStats ? Math.round(getApiStats.calls_estimated) : null;
@@ -530,29 +771,30 @@ router.get('/', async (req, res) => {
 
     const topBrandsSectionHtml =
       `
-    <div class="chart-section">
+    <div class="chart-section" id="topBrandsSection">
       <div class="chart-header">
         <h2>Top 10 Marcas más Transitadas</h2>
       </div>
       <div class="wide-container">
         <div class="brands-marquee" aria-label="Top marcas">
-          <div class="brands-marquee-track" data-animate="${topBrandsMarquee ? '1' : '0'}">
+          <div class="brands-marquee-track" id="topBrandsMarqueeTrack" data-animate="${topBrandsMarquee ? '1' : '0'}">
             ${topBrandsMarquee || '<div class="brands-empty">Sin datos de marcas para mostrar.</div>'}
           </div>
         </div>
-        ${topBrandsBars ? `<div class="brands-bars" aria-label="Gráfico top marcas">${topBrandsBars}</div>` : ''}
+        <div class="brands-bars" id="topBrandsBars" aria-label="Gráfico top marcas">${topBrandsBars || ''}</div>
       </div>
     </div>
       `
 
     const topComunasSectionHtml =
       `
-    <div class="chart-section">
+    <div class="chart-section" id="topComunasSection">
       <div class="chart-header">
         <h2>Ranking Planta Revisora por Comuna</h2>
       </div>
       <div class="wide-container">
-        ${topComunasBars ? `<div class="brands-bars" aria-label="Ranking comunas">${topComunasBars}</div>` : '<div class="brands-empty">Sin datos de comunas para mostrar.</div>'}
+        <div class="brands-bars" id="topComunasBars" aria-label="Ranking comunas">${topComunasBars || ''}</div>
+        ${topComunasBars ? '' : '<div class="brands-empty" id="topComunasEmpty">Sin datos de comunas para mostrar.</div>'}
       </div>
     </div>
       `
@@ -566,6 +808,7 @@ router.get('/', async (req, res) => {
   <title>${title}</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>window.__homeDashboardStats={key:${JSON.stringify(statsKey)},computed_at:${JSON.stringify(viewData?.computed_at || null)}};</script>
   <style>
     :root { 
       color-scheme: light dark;
@@ -1227,7 +1470,12 @@ router.get('/', async (req, res) => {
     const totalPending = ${totalPendientes};
     const totalInvalidPlates = ${totalInvalidPlates};
     const totalTransitadosHoy = ${totalTransitadosHoy};
+    const topBrandsData = ${JSON.stringify(topBrands)};
+    const topComunasData = ${JSON.stringify(topComunas)};
     const rmComunaStats = ${JSON.stringify(rmStatsForUi.map(c => ({ comuna: c.comuna, count: c.count, plants: c.plants || [] })))};
+    window.__topBrandsData = Array.isArray(topBrandsData) ? topBrandsData : [];
+    window.__topComunasData = Array.isArray(topComunasData) ? topComunasData : [];
+    window.__rmComunaStats = Array.isArray(rmComunaStats) ? rmComunaStats : [];
 
     document.getElementById('totalVehicles').textContent = totalVehicles.toLocaleString('es-CL');
     const totalProcessedEl = document.getElementById('totalProcessed');
@@ -1357,9 +1605,9 @@ router.get('/', async (req, res) => {
           .trim();
       };
 
-      const stats = Array.isArray(rmComunaStats) ? rmComunaStats : [];
-      const byComuna = new Map(stats.map((x) => [normalizeKey(x.comuna), x]));
-      const maxCount = stats.reduce((m, x) => Math.max(m, Number(x.count) || 0), 0);
+      let stats = Array.isArray(window.__rmComunaStats) ? window.__rmComunaStats : [];
+      let byComuna = new Map(stats.map((x) => [normalizeKey(x.comuna), x]));
+      let maxCount = stats.reduce((m, x) => Math.max(m, Number(x.count) || 0), 0);
 
       const colorScale = (value) => {
         const v = Number(value) || 0;
@@ -1428,13 +1676,48 @@ router.get('/', async (req, res) => {
         return await r.json();
       };
 
+      let geoLayer = null;
+
+      const applyStatsToMap = (nextStats) => {
+        stats = Array.isArray(nextStats) ? nextStats : [];
+        byComuna = new Map(stats.map((x) => [normalizeKey(x.comuna), x]));
+        maxCount = stats.reduce((m, x) => Math.max(m, Number(x.count) || 0), 0);
+        if (!geoLayer) return;
+        geoLayer.setStyle(styleForFeature);
+        geoLayer.eachLayer((layer) => {
+          const feature = layer && layer.feature ? layer.feature : null;
+          const props = feature && feature.properties ? feature.properties : {};
+          const nameCandidate = props.comuna || props.Comuna || props.NOM_COM || props.NOMBRE || props.name || props.NAME || '';
+          const comunaName = String(nameCandidate || '').trim() || 'COMUNA';
+          const key = normalizeKey(comunaName);
+          const s = byComuna.get(key);
+          const count = s ? (Number(s.count) || 0) : 0;
+          const plants = s && Array.isArray(s.plants) ? s.plants : [];
+          const plantsHtml = plants.length
+            ? ('<div style="margin-top:6px"><b>Plantas</b><br/>' + plants.map((p) => {
+                const n = String(p?.name || '').trim();
+                const c = Number(p?.count) || 0;
+                return n ? (n + ' (' + c.toLocaleString('es-CL') + ')') : null;
+              }).filter(Boolean).join('<br/>') + '</div>')
+            : '';
+          try { layer.unbindPopup(); } catch {}
+          layer.bindPopup('<b>' + comunaName + '</b><br/>Registros: ' + count.toLocaleString('es-CL') + plantsHtml);
+          try { layer.unbindTooltip(); } catch {}
+          if (count > 0) {
+            layer.bindTooltip(comunaName, { permanent: true, direction: 'center', className: 'comuna-label', opacity: 0.95 });
+          }
+        });
+      };
+
+      window.__rmMapUpdate = applyStatsToMap;
+
       (async () => {
         const urls = ['/home/rm-geojson', 'https://raw.githubusercontent.com/sebaebc/chl-geojson/main/13.geojson'];
         for (const url of urls) {
           try {
             const geo = await loadGeo(url);
-            const layer = L.geoJSON(geo, { style: styleForFeature, onEachFeature }).addTo(map);
-            const bounds = layer.getBounds();
+            geoLayer = L.geoJSON(geo, { style: styleForFeature, onEachFeature }).addTo(map);
+            const bounds = geoLayer.getBounds();
             if (bounds && bounds.isValid()) map.fitBounds(bounds.pad(0.08));
             if (statusCtrl && statusCtrl.getContainer()) statusCtrl.getContainer().textContent = 'Listo';
             setTimeout(() => { try { map.removeControl(statusCtrl); } catch {} }, 900);
@@ -1446,11 +1729,172 @@ router.get('/', async (req, res) => {
       })();
     })();
   </script>
+  <script>
+    (function () {
+      var meta = window.__homeDashboardStats || {};
+      if (!meta.key) return;
+      var url = '/home/dashboard-stats.json?key=' + encodeURIComponent(meta.key);
+      function escapeHtml(value) {
+        return String(value == null ? '' : value)
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')
+          .replaceAll('\"', '&quot;')
+          .replaceAll("'", '&#039;');
+      }
+      function formatEsNumber(n) {
+        var v = Number(n);
+        if (!Number.isFinite(v)) return '0';
+        return v.toLocaleString('es-CL');
+      }
+      function setText(id, value) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = value == null ? '0' : String(value);
+      }
+      function applyTotals(t) {
+        if (!t) return;
+        setText('totalVehicles', t.totalVehicles_es || t.totalVehicles || '0');
+        setText('invalidPlates', t.totalInvalidPlates_es || t.totalInvalidPlates || '0');
+        setText('totalProcessed', t.totalProcesados_es || t.totalProcesados || '0');
+        setText('pendingPlates', t.totalPendientes_es || t.totalPendientes || '0');
+        setText('todayVehicles', t.totalTransitadosHoy_es || t.totalTransitadosHoy || '0');
+      }
+      function applyTopBrands(items) {
+        var list = Array.isArray(items) ? items.slice(0, 10) : [];
+        var pills = list.map(function (b, idx) {
+          var rank = Number(b && b.rank) || (idx + 1);
+          var name = escapeHtml(String((b && b.brand) || '').trim());
+          var count = formatEsNumber(b && b.count);
+          return '<div class=\"brand-pill\"><span class=\"brand-pill-rank\">#' + rank + '</span><span class=\"brand-pill-name\">' + name + '</span><span class=\"brand-pill-count\">' + count + '</span></div>';
+        }).join('');
+        var marquee = pills ? (pills + pills) : '<div class=\"brands-empty\">Sin datos de marcas para mostrar.</div>';
+        var track = document.getElementById('topBrandsMarqueeTrack');
+        if (track) {
+          track.innerHTML = marquee;
+          track.dataset.animate = pills ? '1' : '0';
+        }
+        var max = 0;
+        list.forEach(function (b) { max = Math.max(max, Number(b && b.count) || 0); });
+        var bars = list.map(function (b, idx) {
+          var rank = Number(b && b.rank) || (idx + 1);
+          var nameRaw = String((b && b.brand) || '').trim();
+          var name = escapeHtml(nameRaw);
+          var countNum = Number(b && b.count) || 0;
+          var count = formatEsNumber(countNum);
+          var pct = max > 0 ? Math.max(0, Math.min(100, (countNum / max) * 100)) : 0;
+          return '<div class=\"brands-bar-row\"><div class=\"brands-bar-rank\">#' + rank + '</div><div class=\"brands-bar-name\">' + name + '</div><div class=\"brands-bar-track\"><div class=\"brands-bar-fill\" style=\"width:' + pct.toFixed(2) + '%\"></div></div><div class=\"brands-bar-value\">' + count + '</div></div>';
+        }).join('');
+        var barsEl = document.getElementById('topBrandsBars');
+        if (barsEl) barsEl.innerHTML = bars;
+      }
+      function applyTopComunas(items) {
+        var list = Array.isArray(items) ? items.slice(0, 10) : [];
+        var max = 0;
+        list.forEach(function (c) { max = Math.max(max, Number(c && c.count) || 0); });
+        var bars = list.map(function (c, idx) {
+          var rank = Number(c && c.rank) || (idx + 1);
+          var nameRaw = String((c && c.comuna) || '').trim();
+          var name = escapeHtml(nameRaw);
+          var countNum = Number(c && c.count) || 0;
+          var count = formatEsNumber(countNum);
+          var pct = max > 0 ? Math.max(0, Math.min(100, (countNum / max) * 100)) : 0;
+          return '<div class=\"brands-bar-row\"><div class=\"brands-bar-rank\">#' + rank + '</div><div class=\"brands-bar-name\">' + name + '</div><div class=\"brands-bar-track\"><div class=\"brands-bar-fill\" style=\"width:' + pct.toFixed(2) + '%\"></div></div><div class=\"brands-bar-value\">' + count + '</div></div>';
+        }).join('');
+        var barsEl = document.getElementById('topComunasBars');
+        if (barsEl) barsEl.innerHTML = bars;
+        var emptyEl = document.getElementById('topComunasEmpty');
+        if (emptyEl) emptyEl.style.display = bars ? 'none' : '';
+      }
+      function applyMap(stats) {
+        window.__rmComunaStats = Array.isArray(stats) ? stats : [];
+        if (typeof window.__rmMapUpdate === 'function') window.__rmMapUpdate(window.__rmComunaStats);
+      }
+      function applyAll(data) {
+        applyTotals(data && data.totals);
+        applyTopBrands(data && data.topBrands);
+        applyTopComunas(data && data.topComunas);
+        applyMap(data && data.rmComunaStats);
+      }
+      applyAll({ totals: null, topBrands: window.__topBrandsData, topComunas: window.__topComunasData, rmComunaStats: window.__rmComunaStats });
+
+      var startedAt = Date.now();
+      function tick() {
+        fetch(url, { cache: 'no-store' })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (data) {
+            if (!data || !data.ok) return;
+            if (data.computed_at && meta.computed_at && data.computed_at !== meta.computed_at) {
+              meta.computed_at = data.computed_at;
+              applyAll(data);
+              return;
+            }
+            applyTotals(data.totals);
+          })
+          .catch(function () {});
+      }
+      tick();
+      var id = setInterval(function () {
+        if (Date.now() - startedAt > 120000) {
+          clearInterval(id);
+          return;
+        }
+        tick();
+      }, 10000);
+    })();
+  </script>
 </body>
 </html>`);
   } catch (error) {
     console.error('Error en /home:', error);
     res.status(500).send('Error al cargar la página');
+  }
+});
+
+router.get('/dashboard-stats.json', async (req, res) => {
+  try {
+    const fallbackKey = (typeof process.env.HOME_DASHBOARD_STATS_KEY === 'string' && process.env.HOME_DASHBOARD_STATS_KEY.trim())
+      ? process.env.HOME_DASHBOARD_STATS_KEY.trim()
+      : 'home_v1';
+    const key = (typeof req.query.key === 'string' && req.query.key.trim()) ? req.query.key.trim() : fallbackKey;
+
+    const row = await directus.getDashboardStatsByKey(key).catch(() => null);
+    const data = row?.data && typeof row.data === 'object' ? row.data : safeJsonParse(row?.data);
+
+    const formatEsNumber = (n) => {
+      const v = Number(n);
+      if (!Number.isFinite(v)) return '0';
+      return v.toLocaleString('es-CL');
+    };
+
+    const totals = data?.totals && typeof data.totals === 'object' ? data.totals : null;
+    const totalsOut = totals
+      ? {
+          ...totals,
+          totalVehicles_es: formatEsNumber(totals.totalVehicles),
+          totalProcesados_es: formatEsNumber(totals.totalProcesados),
+          totalPendientes_es: formatEsNumber(totals.totalPendientes),
+          totalInvalidPlates_es: formatEsNumber(totals.totalInvalidPlates),
+          totalTransitadosHoy_es: formatEsNumber(totals.totalTransitadosHoy)
+        }
+      : null;
+
+    const topBrands = Array.isArray(data?.topBrands) ? data.topBrands : [];
+    const topComunas = Array.isArray(data?.topComunas) ? data.topComunas : [];
+    const rmStatsForUi = Array.isArray(data?.rmStatsForUi) ? data.rmStatsForUi : [];
+    const rmComunaStats = rmStatsForUi.map((c) => ({ comuna: c.comuna, count: c.count, plants: c.plants || [] }));
+
+    res.json({
+      key,
+      computed_at: data?.computed_at || null,
+      totals: totalsOut,
+      topBrands,
+      topComunas,
+      rmComunaStats,
+      ok: Boolean(data && totals)
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: 'No se pudo leer dashboard_stats', message: e?.message || String(e) });
   }
 });
 
