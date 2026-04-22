@@ -8,6 +8,7 @@ let topComunasCache = { atMs: 0, okCount: null, data: [] };
 let rmGeoJsonCache = { atMs: 0, body: null };
 let rmStatsCache = { atMs: 0, okCount: null, data: [] };
 let dashboardStatsRefreshPromise = null;
+let dashboardStatsMemory = null;
 
 function getDateTimePartsInTimeZone(date, timeZone) {
   const dtf = new Intl.DateTimeFormat('en-US', {
@@ -431,7 +432,11 @@ router.get('/', async (req, res) => {
         }
       };
 
-      await writePersistedStats(data);
+      dashboardStatsMemory = data;
+      try {
+        await writePersistedStats(data);
+      } catch {
+      }
       return data;
     };
 
@@ -456,48 +461,37 @@ router.get('/', async (req, res) => {
     }
 
     const cachedData = cached?.data && typeof cached.data === 'object' ? cached.data : null;
-    const cachedAtMs = cachedData?.computed_at ? new Date(cachedData.computed_at).getTime() : 0;
-    const hasCached = Boolean(cachedData && cachedData.totals && typeof cachedData.totals === 'object');
-    const isFresh = statsTtlMs > 0 && cachedAtMs > 0 && (Date.now() - cachedAtMs < statsTtlMs);
+    const cachedHasTotals = Boolean(cachedData && cachedData.totals && typeof cachedData.totals === 'object');
+    const memoryHasTotals = Boolean(dashboardStatsMemory && dashboardStatsMemory.totals && typeof dashboardStatsMemory.totals === 'object');
 
-    if (!isFresh) triggerBackgroundRefresh(cachedData);
+    let viewData = cachedHasTotals
+      ? cachedData
+      : (memoryHasTotals ? dashboardStatsMemory : null);
 
-    if (!hasCached) {
-      const seed = {
-        version: 1,
-        computed_at: new Date(0).toISOString(),
-        totals: {
-          totalVehicles: 0,
-          totalProcesados: 0,
-          totalPendientes: 0,
-          totalInvalidPlates: 0,
-          totalTransitadosHoy: 0
-        },
-        getApiStats: null,
-        topBrands: [],
-        topComunas: [],
-        rmStatsForUi: [],
-        progress: { okCount: 0, getapiMaxId: 0 },
-        aggregates: { brandCounts: {}, comunaCounts: {}, plantsByComuna: {} }
-      };
-      writePersistedStats(seed).catch(() => {});
-      triggerBackgroundRefresh(seed);
+    if (!viewData) {
+      try {
+        viewData = await computeAndPersistStats(null);
+      } catch {
+        viewData = {
+          totals: {
+            totalVehicles: 0,
+            totalProcesados: 0,
+            totalPendientes: 0,
+            totalInvalidPlates: 0,
+            totalTransitadosHoy: 0
+          },
+          getApiStats: null,
+          topBrands: [],
+          topComunas: [],
+          rmStatsForUi: [],
+          computed_at: null
+        };
+      }
     }
 
-    const viewData = hasCached ? cachedData : {
-      totals: {
-        totalVehicles: 0,
-        totalProcesados: 0,
-        totalPendientes: 0,
-        totalInvalidPlates: 0,
-        totalTransitadosHoy: 0
-      },
-      getApiStats: null,
-      topBrands: [],
-      topComunas: [],
-      rmStatsForUi: [],
-      computed_at: null
-    };
+    const viewAtMs = viewData?.computed_at ? new Date(viewData.computed_at).getTime() : 0;
+    const isFresh = statsTtlMs > 0 && viewAtMs > 0 && (Date.now() - viewAtMs < statsTtlMs);
+    if (!isFresh) triggerBackgroundRefresh(viewData);
 
     const getTopBrands = async ({ limit = 10, okCount = null } = {}) => {
       const ttlMs = Math.max(0, Number.parseInt(process.env.HOME_TOP_BRANDS_TTL_MS ?? '300000', 10) || 300000);
@@ -1859,7 +1853,10 @@ router.get('/dashboard-stats.json', async (req, res) => {
     const key = (typeof req.query.key === 'string' && req.query.key.trim()) ? req.query.key.trim() : fallbackKey;
 
     const row = await directus.getDashboardStatsByKey(key).catch(() => null);
-    const data = row?.data && typeof row.data === 'object' ? row.data : safeJsonParse(row?.data);
+    const parsed = row?.data && typeof row.data === 'object' ? row.data : safeJsonParse(row?.data);
+    const data = (parsed && parsed.totals && typeof parsed.totals === 'object')
+      ? parsed
+      : (dashboardStatsMemory && dashboardStatsMemory.totals && typeof dashboardStatsMemory.totals === 'object' ? dashboardStatsMemory : null);
 
     const formatEsNumber = (n) => {
       const v = Number(n);
@@ -1891,7 +1888,7 @@ router.get('/dashboard-stats.json', async (req, res) => {
       topBrands,
       topComunas,
       rmComunaStats,
-      ok: Boolean(data && totals)
+      ok: Boolean(totalsOut)
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: 'No se pudo leer dashboard_stats', message: e?.message || String(e) });
