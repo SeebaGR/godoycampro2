@@ -7,18 +7,6 @@ let topBrandsCache = { atMs: 0, okCount: null, data: [] };
 let topComunasCache = { atMs: 0, okCount: null, data: [] };
 let rmGeoJsonCache = { atMs: 0, body: null };
 let rmStatsCache = { atMs: 0, okCount: null, data: [] };
-let homeStatsWorkerPromise = null;
-let homeOkTotalCache = { atMs: 0, value: null };
-
-async function getOkTotalCached(getApiCollection) {
-  const ttlMs = Math.max(0, Number.parseInt(process.env.DASHBOARD_STATS_OKTOTAL_TTL_MS ?? '60000', 10) || 60000);
-  const now = Date.now();
-  const fresh = ttlMs > 0 && Number.isFinite(Number(homeOkTotalCache.value)) && (now - homeOkTotalCache.atMs) < ttlMs;
-  if (fresh) return Number(homeOkTotalCache.value) || 0;
-  const n = await directus.countItems(getApiCollection, { 'filter[status][_eq]': 'ok' });
-  homeOkTotalCache = { atMs: Date.now(), value: Number(n) || 0 };
-  return homeOkTotalCache.value;
-}
 
 function getDateTimePartsInTimeZone(date, timeZone) {
   const dtf = new Intl.DateTimeFormat('en-US', {
@@ -182,15 +170,8 @@ router.get('/', async (req, res) => {
         ? payload.vehicle
         : (row.vehicle && typeof row.vehicle === 'object' ? unwrapGetApiEnvelope(row.vehicle) : null);
 
-      const pr = vehicle?.plantaRevisora && typeof vehicle.plantaRevisora === 'object' ? vehicle.plantaRevisora : null;
-      const rtPlant = vehicle?.rtPlant && typeof vehicle.rtPlant === 'object' ? vehicle.rtPlant : null;
-
       const comuna =
-        pickDisplayText(vehicle?.rtCommune) ||
-        pickDisplayText(vehicle?.rtComuna) ||
-        pickDisplayText(rtPlant?.comuna) ||
-        pickDisplayText(rtPlant?.commune) ||
-        pickDisplayText(pr?.comuna) ||
+        pickDisplayText(vehicle?.plantaRevisora?.comuna) ||
         pickDisplayText(vehicle?.planta_revisora?.comuna) ||
         null;
 
@@ -215,30 +196,9 @@ router.get('/', async (req, res) => {
         : (row.vehicle && typeof row.vehicle === 'object' ? unwrapGetApiEnvelope(row.vehicle) : null);
 
       const pr = vehicle?.plantaRevisora && typeof vehicle.plantaRevisora === 'object' ? vehicle.plantaRevisora : null;
-      const rtPlant = vehicle?.rtPlant && typeof vehicle.rtPlant === 'object' ? vehicle.rtPlant : null;
-      const rtStation = vehicle?.rtStation && typeof vehicle.rtStation === 'object' ? vehicle.rtStation : null;
-
-      const name =
-        pickDisplayText(rtPlant?.name) ||
-        pickDisplayText(vehicle?.rtPlantName) ||
-        pickDisplayText(pr?.concesionPlantaRevisora) ||
-        pickDisplayText(pr?.concesion_planta_revisora) ||
-        pickDisplayText(pr?.name) ||
-        pickDisplayText(pr?.nombre) ||
-        pickDisplayText(vehicle?.plantaRevisora) ||
-        pickDisplayText(rtStation?.name) ||
-        pickDisplayText(vehicle?.rtStationName) ||
-        pickDisplayText(vehicle?.rtCompany) ||
-        null;
-
-      const cod =
-        pickDisplayText(pr?.codPrt) ||
-        pickDisplayText(pr?.cod_prt) ||
-        pickDisplayText(rtPlant?.codPrt) ||
-        pickDisplayText(rtPlant?.cod_prt) ||
-        pickDisplayText(rtPlant?.code) ||
-        null;
-
+      if (!pr) return null;
+      const name = pickDisplayText(pr?.concesionPlantaRevisora) || pickDisplayText(pr?.concesion_planta_revisora);
+      const cod = pickDisplayText(pr?.codPrt) || pickDisplayText(pr?.cod_prt);
       const pretty = (cod && name) ? (cod + ' · ' + name) : (name || cod);
       if (!pretty) return null;
       return String(pretty).toUpperCase().replace(/\s+/g, ' ').trim();
@@ -409,15 +369,78 @@ router.get('/', async (req, res) => {
       console.warn('No se pudo obtener estadísticas GetAPI:', e.message);
     }
 
-    const topBrands = [];
-    const rmStatsForUi = [];
-    const topComunas = [];
+    let topBrands = [];
+    try {
+      topBrands = await getTopBrands({
+        limit: 10,
+        okCount: totalProcesados
+      });
+    } catch (e) {
+      console.warn('No se pudo obtener TOP marcas:', e.message);
+    }
+
+    let rmStatsForUi = [];
+    let topComunas = [];
+    try {
+      rmStatsForUi = await getRmComunaStats({ okCount: totalProcesados });
+      topComunas = rmStatsForUi.slice(0, 10).map((x, idx) => ({ rank: idx + 1, comuna: x.comuna, count: x.count }));
+    } catch (e) {
+      console.warn('No se pudo obtener TOP comunas:', e.message);
+    }
 
     const formatEsNumber = (n) => {
       const v = Number(n);
       if (!Number.isFinite(v)) return '0';
       return v.toLocaleString('es-CL');
     };
+
+    const topBrandsPills = Array.isArray(topBrands)
+      ? topBrands
+          .map((b) => {
+            const rank = Number(b?.rank) || 0;
+            const brand = escapeHtml(String(b?.brand ?? '').trim());
+            const count = formatEsNumber(b?.count);
+            return `<div class="brand-pill"><span class="brand-pill-rank">#${rank}</span><span class="brand-pill-name">${brand}</span><span class="brand-pill-count">${count}</span></div>`;
+          })
+          .join('')
+      : '';
+    const topBrandsMarquee = topBrandsPills ? topBrandsPills + topBrandsPills : '';
+
+    const maxBrandCount = Array.isArray(topBrands)
+      ? topBrands.reduce((m, b) => Math.max(m, Number(b?.count) || 0), 0)
+      : 0;
+
+    const topBrandsBars = Array.isArray(topBrands) && topBrands.length
+      ? topBrands
+          .map((b) => {
+            const rank = Number(b?.rank) || 0;
+            const brandRaw = String(b?.brand ?? '').trim();
+            const brand = escapeHtml(brandRaw);
+            const countNum = Number(b?.count) || 0;
+            const count = formatEsNumber(countNum);
+            const pct = maxBrandCount > 0 ? Math.max(0, Math.min(100, (countNum / maxBrandCount) * 100)) : 0;
+            return `<div class="brands-bar-row"><div class="brands-bar-rank">#${rank}</div><div class="brands-bar-name">${brand}</div><div class="brands-bar-track"><div class="brands-bar-fill" style="width:${pct.toFixed(2)}%"></div></div><div class="brands-bar-value">${count}</div></div>`;
+          })
+          .join('')
+      : '';
+
+    const maxComunaCount = Array.isArray(topComunas)
+      ? topComunas.reduce((m, c) => Math.max(m, Number(c?.count) || 0), 0)
+      : 0;
+
+    const topComunasBars = Array.isArray(topComunas) && topComunas.length
+      ? topComunas
+          .map((c) => {
+            const rank = Number(c?.rank) || 0;
+            const comunaRaw = String(c?.comuna ?? '').trim();
+            const comuna = escapeHtml(comunaRaw);
+            const countNum = Number(c?.count) || 0;
+            const count = formatEsNumber(countNum);
+            const pct = maxComunaCount > 0 ? Math.max(0, Math.min(100, (countNum / maxComunaCount) * 100)) : 0;
+            return `<div class="brands-bar-row"><div class="brands-bar-rank">#${rank}</div><div class="brands-bar-name">${comuna}</div><div class="brands-bar-track"><div class="brands-bar-fill" style="width:${pct.toFixed(2)}%"></div></div><div class="brands-bar-value">${count}</div></div>`;
+          })
+          .join('')
+      : '';
 
     // 3) Transitados Hoy (timestamp de vehicle_detections)
     let totalTransitadosHoy = 0;
@@ -513,11 +536,11 @@ router.get('/', async (req, res) => {
       </div>
       <div class="wide-container">
         <div class="brands-marquee" aria-label="Top marcas">
-          <div class="brands-marquee-track" id="topBrandsMarqueeTrack" data-animate="0">
-            <div class="brands-empty"><span class="loading-inline"><span class="spinner"></span><span>Cargando marcas…</span></span></div>
+          <div class="brands-marquee-track" data-animate="${topBrandsMarquee ? '1' : '0'}">
+            ${topBrandsMarquee || '<div class="brands-empty">Sin datos de marcas para mostrar.</div>'}
           </div>
         </div>
-        <div class="brands-bars" id="topBrandsBars" aria-label="Gráfico top marcas"></div>
+        ${topBrandsBars ? `<div class="brands-bars" aria-label="Gráfico top marcas">${topBrandsBars}</div>` : ''}
       </div>
     </div>
       `
@@ -529,9 +552,7 @@ router.get('/', async (req, res) => {
         <h2>Ranking Planta Revisora por Comuna</h2>
       </div>
       <div class="wide-container">
-        <div class="brands-bars" id="topComunasBars" aria-label="Ranking comunas">
-          <div class="brands-empty"><span class="loading-inline"><span class="spinner"></span><span>Cargando comunas…</span></span></div>
-        </div>
+        ${topComunasBars ? `<div class="brands-bars" aria-label="Ranking comunas">${topComunasBars}</div>` : '<div class="brands-empty">Sin datos de comunas para mostrar.</div>'}
       </div>
     </div>
       `
@@ -794,24 +815,6 @@ router.get('/', async (req, res) => {
       padding: 14px;
       font-size: 14px;
       opacity: 0.75;
-    }
-    .loading-inline {
-      display: inline-flex;
-      align-items: center;
-      gap: 10px;
-    }
-    .spinner {
-      width: 14px;
-      height: 14px;
-      border-radius: 999px;
-      border: 2px solid rgba(127,127,127,.35);
-      border-top-color: var(--primary);
-      animation: spin 0.85s linear infinite;
-      flex: 0 0 auto;
-    }
-    @keyframes spin {
-      from { transform: rotate(0deg); }
-      to { transform: rotate(360deg); }
     }
     .card { 
       border: 1px solid var(--border);
@@ -1224,7 +1227,7 @@ router.get('/', async (req, res) => {
     const totalPending = ${totalPendientes};
     const totalInvalidPlates = ${totalInvalidPlates};
     const totalTransitadosHoy = ${totalTransitadosHoy};
-    let rmComunaStats = [];
+    const rmComunaStats = ${JSON.stringify(rmStatsForUi.map(c => ({ comuna: c.comuna, count: c.count, plants: c.plants || [] })))};
 
     document.getElementById('totalVehicles').textContent = totalVehicles.toLocaleString('es-CL');
     const totalProcessedEl = document.getElementById('totalProcessed');
@@ -1236,118 +1239,6 @@ router.get('/', async (req, res) => {
     document.getElementById('todayVehicles').textContent = totalTransitadosHoy.toLocaleString('es-CL');
 
     function pad(num){ return String(num).padStart(2,'0'); }
-
-    const escapeHtml = (value) => {
-      return String(value ?? '')
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#039;');
-    };
-
-    const formatEsNumber = (n) => {
-      const v = Number(n);
-      if (!Number.isFinite(v)) return '0';
-      return v.toLocaleString('es-CL');
-    };
-
-    const delay = (ms) => new Promise((r) => setTimeout(r, ms));
-
-    function renderTopBrands(topBrands, loadingText) {
-      const track = document.getElementById('topBrandsMarqueeTrack');
-      const barsEl = document.getElementById('topBrandsBars');
-      if (!track || !barsEl) return;
-      const list = Array.isArray(topBrands) ? topBrands : [];
-      if (list.length === 0) {
-        track.dataset.animate = '0';
-        const msg = typeof loadingText === 'string' && loadingText.trim() ? loadingText.trim() : null;
-        track.innerHTML = msg
-          ? ('<div class="brands-empty"><span class="loading-inline"><span class="spinner"></span><span>' + escapeHtml(msg) + '</span></span></div>')
-          : '<div class="brands-empty">Sin datos de marcas para mostrar.</div>';
-        barsEl.innerHTML = '';
-        return;
-      }
-
-      const pills = list.map((b, i) => {
-        const rank = Number(b?.rank) || (i + 1);
-        const brand = escapeHtml(String(b?.brand ?? '').trim());
-        const count = formatEsNumber(b?.count);
-        return '<div class="brand-pill"><span class="brand-pill-rank">#' + rank + '</span><span class="brand-pill-name">' + brand + '</span><span class="brand-pill-count">' + count + '</span></div>';
-      }).join('');
-      const marquee = pills + pills;
-      track.dataset.animate = marquee ? '1' : '0';
-      track.innerHTML = marquee || '<div class="brands-empty">Sin datos de marcas para mostrar.</div>';
-
-      const maxCount = list.reduce((m, b) => Math.max(m, Number(b?.count) || 0), 0);
-      const bars = list.map((b, i) => {
-        const rank = Number(b?.rank) || (i + 1);
-        const brand = escapeHtml(String(b?.brand ?? '').trim());
-        const countNum = Number(b?.count) || 0;
-        const count = formatEsNumber(countNum);
-        const pct = maxCount > 0 ? Math.max(0, Math.min(100, (countNum / maxCount) * 100)) : 0;
-        return '<div class="brands-bar-row"><div class="brands-bar-rank">#' + rank + '</div><div class="brands-bar-name">' + brand + '</div><div class="brands-bar-track"><div class="brands-bar-fill" style="width:' + pct.toFixed(2) + '%"></div></div><div class="brands-bar-value">' + count + '</div></div>';
-      }).join('');
-      barsEl.innerHTML = bars;
-    }
-
-    function renderTopComunas(topComunas, loadingText) {
-      const barsEl = document.getElementById('topComunasBars');
-      if (!barsEl) return;
-      const list = Array.isArray(topComunas) ? topComunas : [];
-      if (list.length === 0) {
-        const msg = typeof loadingText === 'string' && loadingText.trim() ? loadingText.trim() : null;
-        barsEl.innerHTML = msg
-          ? ('<div class="brands-empty"><span class="loading-inline"><span class="spinner"></span><span>' + escapeHtml(msg) + '</span></span></div>')
-          : '<div class="brands-empty">Sin datos de comunas para mostrar.</div>';
-        return;
-      }
-      const maxCount = list.reduce((m, c) => Math.max(m, Number(c?.count) || 0), 0);
-      const bars = list.map((c, i) => {
-        const rank = Number(c?.rank) || (i + 1);
-        const comuna = escapeHtml(String(c?.comuna ?? '').trim());
-        const countNum = Number(c?.count) || 0;
-        const count = formatEsNumber(countNum);
-        const pct = maxCount > 0 ? Math.max(0, Math.min(100, (countNum / maxCount) * 100)) : 0;
-        return '<div class="brands-bar-row"><div class="brands-bar-rank">#' + rank + '</div><div class="brands-bar-name">' + comuna + '</div><div class="brands-bar-track"><div class="brands-bar-fill" style="width:' + pct.toFixed(2) + '%"></div></div><div class="brands-bar-value">' + count + '</div></div>';
-      }).join('');
-      barsEl.innerHTML = bars;
-    }
-
-    const homeStatsPromise = (async () => {
-      const maxAttempts = 120;
-      const pollMs = 1200;
-      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-        try {
-          const response = await fetch('/home/stats', { cache: 'no-store' });
-          if (!response.ok) throw new Error('No se pudo cargar estadísticas de Home');
-          const payload = await response.json();
-          const topBrands = Array.isArray(payload?.topBrands) ? payload.topBrands : [];
-          const topComunas = Array.isArray(payload?.topComunas) ? payload.topComunas : [];
-          rmComunaStats = Array.isArray(payload?.rmComunaStats) ? payload.rmComunaStats : [];
-
-          const okProcessed = Number(payload?.okProcessed) || 0;
-          const okTotal = Number(payload?.okTotal) || 0;
-          const pct = okTotal > 0 ? Math.max(0, Math.min(100, (okProcessed / okTotal) * 100)) : 0;
-          const loadingText = payload?.building
-            ? ('Actualizando rank/top… ' + pct.toFixed(0) + '% (' + okProcessed.toLocaleString('es-CL') + '/' + okTotal.toLocaleString('es-CL') + ')')
-            : null;
-
-          renderTopBrands(topBrands, loadingText);
-          renderTopComunas(topComunas, loadingText);
-
-          if (!payload?.building) return payload;
-          await delay(pollMs);
-        } catch (e) {
-          console.error(e);
-          renderTopBrands([]);
-          renderTopComunas([]);
-          rmComunaStats = [];
-          return null;
-        }
-      }
-      return null;
-    })();
 
     async function fetchHourlyData(date) {
       const response = await fetch('/home/hourly?date=' + encodeURIComponent(date));
@@ -1445,10 +1336,9 @@ router.get('/', async (req, res) => {
     document.getElementById('selectedDate').value = initialDate;
     loadHourly();
 
-    (async function initRMMap() {
+    (function initRMMap() {
       const el = document.getElementById('mapRM');
       if (!el || typeof L === 'undefined') return;
-      await homeStatsPromise.catch(() => null);
       const map = L.map(el).setView([-33.45, -70.66], 11);
       L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
         maxZoom: 18,
@@ -1561,417 +1451,6 @@ router.get('/', async (req, res) => {
   } catch (error) {
     console.error('Error en /home:', error);
     res.status(500).send('Error al cargar la página');
-  }
-});
-
-router.get('/stats', async (req, res) => {
-  try {
-    const limitBrands = Math.min(50, Math.max(1, Number.parseInt(req.query?.brands_limit ?? '10', 10) || 10));
-    const limitComunas = Math.min(50, Math.max(1, Number.parseInt(req.query?.comunas_limit ?? '10', 10) || 10));
-    const rebuild = String(req.query?.rebuild || '').trim() === '1';
-
-    const statsCollection = (process.env.DASHBOARD_STATS_COLLECTION || 'dashboard_stats').trim();
-    const statsKeyField = (process.env.DASHBOARD_STATS_KEY_FIELD || 'key').trim();
-    const statsKeyValue = (process.env.DASHBOARD_STATS_KEY_VALUE || 'home').trim();
-    const statsDataField = (process.env.DASHBOARD_STATS_DATA_FIELD || 'data').trim();
-
-    const batchSize = Math.min(500, Math.max(50, Number.parseInt(process.env.DASHBOARD_STATS_BATCH_SIZE ?? '300', 10) || 300));
-    const stepBudgetMs = Math.max(500, Number.parseInt(process.env.DASHBOARD_STATS_STEP_BUDGET_MS ?? '5000', 10) || 5000);
-    const loopDelayMs = Math.max(0, Number.parseInt(process.env.DASHBOARD_STATS_LOOP_DELAY_MS ?? '150', 10) || 150);
-
-    const safeJsonParse = (value) => {
-      if (value == null) return null;
-      if (typeof value === 'object') return value;
-      if (typeof value !== 'string') return null;
-      try {
-        return JSON.parse(value);
-      } catch {
-        return null;
-      }
-    };
-
-    const pickDisplayText = (value) => {
-      if (value == null) return null;
-      if (typeof value === 'string') return value.trim() || null;
-      if (typeof value === 'number' && Number.isFinite(value)) return String(value);
-      if (typeof value === 'object') {
-        const name = typeof value.name === 'string' ? value.name.trim() : '';
-        if (name) return name;
-        const title = typeof value.title === 'string' ? value.title.trim() : '';
-        if (title) return title;
-      }
-      return null;
-    };
-
-    const unwrapGetApiEnvelope = (value) => {
-      if (!value || typeof value !== 'object') return value;
-      if ('data' in value && value.data && typeof value.data === 'object') {
-        const hasMeta = value.success === true || typeof value.status === 'number' || typeof value.ok === 'boolean';
-        const looksLikeVehicle = typeof value.data.licensePlate === 'string' || typeof value.data.vinNumber === 'string' || typeof value.data.engineNumber === 'string';
-        const looksLikeAppraisal = typeof value.data.vehicleId === 'string' || typeof value.data.vehicleId === 'number' || value.data.precioUsado || value.data.precio_usado;
-        if (hasMeta || looksLikeVehicle || looksLikeAppraisal) return value.data;
-      }
-      return value;
-    };
-
-    const normalizeGetApiPayload = (value) => {
-      const base = unwrapGetApiEnvelope(value);
-      if (!base || typeof base !== 'object') return null;
-      const next = { ...base };
-      if (next.vehicle && typeof next.vehicle === 'object') {
-        const v = unwrapGetApiEnvelope(next.vehicle);
-        next.vehicle = v;
-        if (v && typeof v === 'object' && v.model && typeof v.model === 'object') {
-          next.vehicle = { ...v, model: unwrapGetApiEnvelope(v.model) };
-        }
-      }
-      if (next.appraisal && typeof next.appraisal === 'object') {
-        const a = unwrapGetApiEnvelope(next.appraisal);
-        next.appraisal = a;
-        if (a && typeof a === 'object' && a.vehicle && typeof a.vehicle === 'object') {
-          next.appraisal = { ...a, vehicle: unwrapGetApiEnvelope(a.vehicle) };
-        }
-      }
-      return next;
-    };
-
-    const extractBrand = (row) => {
-      if (!row || typeof row !== 'object') return null;
-      const payloadCandidates = [row.getapi, row.payload, row.data, row.result, row.response, row.json];
-      const rawPayload = payloadCandidates.map(safeJsonParse).find((x) => x && typeof x === 'object') || null;
-      const payload = normalizeGetApiPayload(rawPayload);
-      const vehicle = payload?.vehicle && typeof payload.vehicle === 'object'
-        ? payload.vehicle
-        : (row.vehicle && typeof row.vehicle === 'object' ? unwrapGetApiEnvelope(row.vehicle) : null);
-      const brand =
-        pickDisplayText(vehicle?.brand?.name) ||
-        pickDisplayText(vehicle?.brand) ||
-        pickDisplayText(vehicle?.model?.brand?.name) ||
-        pickDisplayText(vehicle?.model?.brand) ||
-        null;
-      if (!brand) return null;
-      return brand.toUpperCase().replace(/\s+/g, ' ').trim();
-    };
-
-    const extractComuna = (row) => {
-      if (!row || typeof row !== 'object') return null;
-      const payloadCandidates = [row.getapi, row.payload, row.data, row.result, row.response, row.json];
-      const rawPayload = payloadCandidates.map(safeJsonParse).find((x) => x && typeof x === 'object') || null;
-      const payload = normalizeGetApiPayload(rawPayload);
-      const vehicle = payload?.vehicle && typeof payload.vehicle === 'object'
-        ? payload.vehicle
-        : (row.vehicle && typeof row.vehicle === 'object' ? unwrapGetApiEnvelope(row.vehicle) : null);
-      const pr = vehicle?.plantaRevisora && typeof vehicle.plantaRevisora === 'object' ? vehicle.plantaRevisora : null;
-      const rtPlant = vehicle?.rtPlant && typeof vehicle.rtPlant === 'object' ? vehicle.rtPlant : null;
-      const comuna =
-        pickDisplayText(vehicle?.rtCommune) ||
-        pickDisplayText(vehicle?.rtComuna) ||
-        pickDisplayText(rtPlant?.comuna) ||
-        pickDisplayText(rtPlant?.commune) ||
-        pickDisplayText(pr?.comuna) ||
-        pickDisplayText(vehicle?.planta_revisora?.comuna) ||
-        null;
-      if (!comuna) return null;
-      return comuna.toUpperCase().replace(/\s+/g, ' ').trim();
-    };
-
-    const extractPlanta = (row) => {
-      if (!row || typeof row !== 'object') return null;
-      const payloadCandidates = [row.getapi, row.payload, row.data, row.result, row.response, row.json];
-      const rawPayload = payloadCandidates.map(safeJsonParse).find((x) => x && typeof x === 'object') || null;
-      const payload = normalizeGetApiPayload(rawPayload);
-      const vehicle = payload?.vehicle && typeof payload.vehicle === 'object'
-        ? payload.vehicle
-        : (row.vehicle && typeof row.vehicle === 'object' ? unwrapGetApiEnvelope(row.vehicle) : null);
-      const pr = vehicle?.plantaRevisora && typeof vehicle.plantaRevisora === 'object' ? vehicle.plantaRevisora : null;
-      const rtPlant = vehicle?.rtPlant && typeof vehicle.rtPlant === 'object' ? vehicle.rtPlant : null;
-      const rtStation = vehicle?.rtStation && typeof vehicle.rtStation === 'object' ? vehicle.rtStation : null;
-
-      const name =
-        pickDisplayText(rtPlant?.name) ||
-        pickDisplayText(vehicle?.rtPlantName) ||
-        pickDisplayText(pr?.concesionPlantaRevisora) ||
-        pickDisplayText(pr?.concesion_planta_revisora) ||
-        pickDisplayText(pr?.name) ||
-        pickDisplayText(pr?.nombre) ||
-        pickDisplayText(vehicle?.plantaRevisora) ||
-        pickDisplayText(rtStation?.name) ||
-        pickDisplayText(vehicle?.rtStationName) ||
-        pickDisplayText(vehicle?.rtCompany) ||
-        null;
-
-      const cod =
-        pickDisplayText(pr?.codPrt) ||
-        pickDisplayText(pr?.cod_prt) ||
-        pickDisplayText(rtPlant?.codPrt) ||
-        pickDisplayText(rtPlant?.cod_prt) ||
-        pickDisplayText(rtPlant?.code) ||
-        null;
-
-      const pretty = (cod && name) ? (cod + ' · ' + name) : (name || cod);
-      if (!pretty) return null;
-      return String(pretty).toUpperCase().replace(/\s+/g, ' ').trim();
-    };
-
-    const nowIso = () => new Date().toISOString();
-    const delay = (ms) => new Promise((r) => setTimeout(r, ms));
-
-    const parseStatsData = (row) => {
-      const raw = row && typeof row === 'object' ? (row[statsDataField] ?? row.data ?? null) : null;
-      const parsed = safeJsonParse(raw);
-      const base = parsed && typeof parsed === 'object' ? parsed : (raw && typeof raw === 'object' ? raw : null);
-      const next = base && typeof base === 'object' ? { ...base } : {};
-      if (!next.version) next.version = 1;
-      if (!next.cursor || typeof next.cursor !== 'object') next.cursor = {};
-      if (!next.brands || typeof next.brands !== 'object') next.brands = {};
-      if (!next.comunas || typeof next.comunas !== 'object') next.comunas = {};
-      if (!next.plants || typeof next.plants !== 'object') next.plants = {};
-      if (!Number.isFinite(Number(next.ok_processed))) next.ok_processed = 0;
-      if (!Number.isFinite(Number(next.ok_total))) next.ok_total = 0;
-      if (typeof next.updated_at !== 'string') next.updated_at = null;
-      if (next.last_error != null && typeof next.last_error !== 'object') next.last_error = null;
-      return next;
-    };
-
-    const writeStatsRow = async (rowId, data) => {
-      const base = { [statsKeyField]: statsKeyValue, [statsDataField]: data };
-      try {
-        if (rowId) return await directus.updateItem(statsCollection, rowId, base);
-        return await directus.createItem(statsCollection, base);
-      } catch (e1) {
-        const base2 = { [statsKeyField]: statsKeyValue, [statsDataField]: JSON.stringify(data || {}) };
-        if (rowId) return await directus.updateItem(statsCollection, rowId, base2);
-        return await directus.createItem(statsCollection, base2);
-      }
-    };
-
-    const readStatsRow = async () => {
-      const query = { limit: 1, [`filter[${statsKeyField}][_eq]`]: statsKeyValue };
-      const rows = await directus.listItems(statsCollection, query);
-      const found = rows[0] || null;
-      if (found) return found;
-      const rowsAny = await directus.listItems(statsCollection, { limit: 1 });
-      return rowsAny[0] || null;
-    };
-
-    const computeUi = (data) => {
-      const brandEntries = Object.entries(data?.brands && typeof data.brands === 'object' ? data.brands : {});
-      const computedBrands = brandEntries
-        .map(([brand, count]) => ({ brand, count: Number(count) || 0 }))
-        .filter((x) => x.brand && x.count > 0)
-        .sort((a, b) => b.count - a.count)
-        .map((x, idx) => ({ rank: idx + 1, brand: x.brand, count: x.count }));
-
-      const comunaEntries = Object.entries(data?.comunas && typeof data.comunas === 'object' ? data.comunas : {});
-      const computedComunas = comunaEntries
-        .map(([comuna, count]) => ({ comuna, count: Number(count) || 0 }))
-        .filter((x) => x.comuna && x.count > 0)
-        .sort((a, b) => b.count - a.count);
-
-      const plantsObj = data?.plants && typeof data.plants === 'object' ? data.plants : {};
-      const rmComunaStats = computedComunas.map((c) => {
-        const plantsMap = plantsObj[c.comuna] && typeof plantsObj[c.comuna] === 'object' ? plantsObj[c.comuna] : {};
-        const plants = Object.entries(plantsMap)
-          .map(([name, count]) => ({ name, count: Number(count) || 0 }))
-          .filter((x) => x.name && x.count > 0)
-          .sort((a, b) => b.count - a.count)
-          .slice(0, 3);
-        return { comuna: c.comuna, count: c.count, plants };
-      });
-
-      const topBrands = computedBrands.slice(0, limitBrands);
-      const topComunas = computedComunas.slice(0, limitComunas).map((x, idx) => ({ rank: idx + 1, comuna: x.comuna, count: x.count }));
-
-      return { topBrands, topComunas, rmComunaStats, computedBrands, computedComunas };
-    };
-
-    const getApiCollection = directus.getDirectusGetApiCollection();
-    if (!getApiCollection) {
-      return res.status(500).json({ error: 'DIRECTUS_GETAPI_COLLECTION no está configurado' });
-    }
-
-    const okTotal = await getOkTotalCached(getApiCollection);
-
-    const ensureAndKickWorker = async () => {
-      if (homeStatsWorkerPromise) return;
-      homeStatsWorkerPromise = (async () => {
-        let cursorField = null;
-        try {
-          const cursor = await directus.getLatestGetApiCursor({ onlySuccess: true });
-          cursorField = cursor?.field || null;
-        } catch {
-          cursorField = null;
-        }
-        for (;;) {
-          let row;
-          try {
-            row = await readStatsRow();
-          } catch (e) {
-            throw e;
-          }
-
-          let rowId = row?.id ?? null;
-          let data = parseStatsData(row);
-
-          data.ok_total = Number.isFinite(Number(okTotal)) ? Number(okTotal) : 0;
-          if (cursorField) data.cursor.field = cursorField;
-
-          const startedAt = Date.now();
-          let advanced = 0;
-          try {
-            while ((Date.now() - startedAt) < stepBudgetMs) {
-              const afterAt = typeof data?.cursor?.at === 'string' ? data.cursor.at : null;
-              const afterId = data?.cursor?.id != null ? Number(data.cursor.id) : null;
-              const rows = await directus.listGetApiAfter({ afterAt, afterId, limit: batchSize, onlySuccess: true });
-              if (!Array.isArray(rows) || rows.length === 0) break;
-
-              for (const r of rows) {
-                const brand = extractBrand(r);
-                if (brand) data.brands[brand] = (Number(data.brands[brand]) || 0) + 1;
-
-                const comuna = extractComuna(r);
-                if (comuna) {
-                  data.comunas[comuna] = (Number(data.comunas[comuna]) || 0) + 1;
-                  const planta = extractPlanta(r);
-                  if (planta) {
-                    const current = data.plants[comuna] && typeof data.plants[comuna] === 'object' ? data.plants[comuna] : {};
-                    current[planta] = (Number(current[planta]) || 0) + 1;
-                    data.plants[comuna] = current;
-                  }
-                }
-
-                const idNum = r?.id != null ? Number(r.id) : null;
-                if (Number.isFinite(idNum)) data.cursor.id = idNum;
-
-                if (cursorField && typeof r?.[cursorField] === 'string' && r[cursorField]) {
-                  data.cursor.at = r[cursorField];
-                }
-
-                data.ok_processed = (Number(data.ok_processed) || 0) + 1;
-                advanced += 1;
-              }
-
-              if ((Date.now() - startedAt) >= stepBudgetMs) break;
-            }
-            data.last_error = null;
-          } catch (e) {
-            data.last_error = {
-              at: nowIso(),
-              status: e?.status ?? null,
-              message: e?.message || String(e)
-            };
-          }
-
-          data.updated_at = nowIso();
-
-          try {
-            const saved = await writeStatsRow(rowId, data);
-            if (!rowId && saved?.id) rowId = saved.id;
-          } catch (e) {
-            throw e;
-          }
-
-          if (advanced === 0) break;
-          if (loopDelayMs > 0) await delay(loopDelayMs);
-        }
-      })()
-        .catch((e) => {
-          console.error('Error en worker /home/stats:', e);
-        })
-        .finally(() => {
-          homeStatsWorkerPromise = null;
-        });
-    };
-
-    let row = null;
-    try {
-      row = await readStatsRow();
-    } catch (e) {
-      const status = e?.status ?? null;
-      const msg = e?.message || String(e);
-      return res.status(500).json({
-        error: 'No se pudo leer la tabla de dashboard',
-        detail: msg,
-        status,
-        config: { statsCollection, statsKeyField, statsKeyValue, statsDataField }
-      });
-    }
-
-    if (!row) {
-      const initial = {
-        version: 1,
-        cursor: {},
-        brands: {},
-        comunas: {},
-        plants: {},
-        ok_processed: 0,
-        ok_total: Number.isFinite(Number(okTotal)) ? Number(okTotal) : 0,
-        updated_at: null
-      };
-      try {
-        row = await writeStatsRow(null, initial);
-      } catch (e) {
-        const status = e?.status ?? null;
-        const msg = e?.message || String(e);
-        return res.status(500).json({
-          error: 'No se pudo crear registro en la tabla de dashboard',
-          detail: msg,
-          status,
-          config: { statsCollection, statsKeyField, statsKeyValue, statsDataField }
-        });
-      }
-    }
-
-    if (rebuild) {
-      const reset = {
-        version: 1,
-        cursor: {},
-        brands: {},
-        comunas: {},
-        plants: {},
-        ok_processed: 0,
-        ok_total: Number.isFinite(Number(okTotal)) ? Number(okTotal) : 0,
-        updated_at: null
-      };
-      try {
-        row = await writeStatsRow(row?.id ?? null, reset);
-      } catch (e) {
-        const status = e?.status ?? null;
-        const msg = e?.message || String(e);
-        return res.status(500).json({
-          error: 'No se pudo reiniciar estadísticas de dashboard',
-          detail: msg,
-          status
-        });
-      }
-    }
-
-    const data = parseStatsData(row);
-    data.ok_total = Number.isFinite(Number(okTotal)) ? Number(okTotal) : 0;
-
-    const needsUpdate = (Number(data.ok_processed) || 0) < (Number(data.ok_total) || 0);
-    if (needsUpdate) {
-      await ensureAndKickWorker();
-    }
-
-    const ui = computeUi(data);
-
-    topBrandsCache = { atMs: Date.now(), okCount: data.ok_processed, data: ui.computedBrands };
-    rmStatsCache = { atMs: Date.now(), okCount: data.ok_processed, data: ui.rmComunaStats };
-
-    return res.json({
-      building: Boolean(homeStatsWorkerPromise) || ((Number(data.ok_processed) || 0) < (Number(data.ok_total) || 0)),
-      okTotal: Number(data.ok_total) || 0,
-      okProcessed: Number(data.ok_processed) || 0,
-      updatedAt: typeof data.updated_at === 'string' ? data.updated_at : null,
-      lastError: data.last_error && typeof data.last_error === 'object' ? data.last_error : null,
-      topBrands: ui.topBrands,
-      topComunas: ui.topComunas,
-      rmComunaStats: ui.rmComunaStats
-    });
-  } catch (error) {
-    console.error('Error en /home/stats:', error);
-    res.status(500).json({ error: 'No se pudo obtener estadísticas de Home' });
   }
 });
 
