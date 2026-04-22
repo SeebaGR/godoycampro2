@@ -1466,7 +1466,7 @@ router.get('/', async (req, res) => {
     const totalTransitadosHoy = ${totalTransitadosHoy};
     const topBrandsData = ${JSON.stringify(topBrands)};
     const topComunasData = ${JSON.stringify(topComunas)};
-    const rmComunaStats = ${JSON.stringify(rmStatsForUi.map(c => ({ comuna: c.comuna, count: c.count, plants: c.plants || [] })))};
+    const rmComunaStats = ${JSON.stringify(rmStatsForUi.map(c => ({ comuna: c.comuna, count: c.count })))};
     window.__topBrandsData = Array.isArray(topBrandsData) ? topBrandsData : [];
     window.__topComunasData = Array.isArray(topComunasData) ? topComunasData : [];
     window.__rmComunaStats = Array.isArray(rmComunaStats) ? rmComunaStats : [];
@@ -1633,16 +1633,7 @@ router.get('/', async (req, res) => {
         const key = normalizeKey(comunaName);
         const s = byComuna.get(key);
         const count = s ? (Number(s.count) || 0) : 0;
-        const plants = s && Array.isArray(s.plants) ? s.plants : [];
-        const plantsHtml = plants.length
-          ? ('<div style="margin-top:6px"><b>Plantas</b><br/>' + plants.map((p) => {
-              const n = String(p?.name || '').trim();
-              const c = Number(p?.count) || 0;
-              return n ? (n + ' (' + c.toLocaleString('es-CL') + ')') : null;
-            }).filter(Boolean).join('<br/>') + '</div>')
-          : '';
-
-        layer.bindPopup('<b>' + comunaName + '</b><br/>Registros: ' + count.toLocaleString('es-CL') + plantsHtml);
+        layer.bindPopup('<b>' + comunaName + '</b><br/>Registros: ' + count.toLocaleString('es-CL'));
         if (count > 0) {
           layer.bindTooltip(comunaName, { permanent: true, direction: 'center', className: 'comuna-label', opacity: 0.95 });
         }
@@ -1686,16 +1677,8 @@ router.get('/', async (req, res) => {
           const key = normalizeKey(comunaName);
           const s = byComuna.get(key);
           const count = s ? (Number(s.count) || 0) : 0;
-          const plants = s && Array.isArray(s.plants) ? s.plants : [];
-          const plantsHtml = plants.length
-            ? ('<div style="margin-top:6px"><b>Plantas</b><br/>' + plants.map((p) => {
-                const n = String(p?.name || '').trim();
-                const c = Number(p?.count) || 0;
-                return n ? (n + ' (' + c.toLocaleString('es-CL') + ')') : null;
-              }).filter(Boolean).join('<br/>') + '</div>')
-            : '';
           try { layer.unbindPopup(); } catch {}
-          layer.bindPopup('<b>' + comunaName + '</b><br/>Registros: ' + count.toLocaleString('es-CL') + plantsHtml);
+          layer.bindPopup('<b>' + comunaName + '</b><br/>Registros: ' + count.toLocaleString('es-CL'));
           try { layer.unbindTooltip(); } catch {}
           if (count > 0) {
             layer.bindTooltip(comunaName, { permanent: true, direction: 'center', className: 'comuna-label', opacity: 0.95 });
@@ -1879,7 +1862,7 @@ router.get('/dashboard-stats.json', async (req, res) => {
     const topBrands = Array.isArray(data?.topBrands) ? data.topBrands : [];
     const topComunas = Array.isArray(data?.topComunas) ? data.topComunas : [];
     const rmStatsForUi = Array.isArray(data?.rmStatsForUi) ? data.rmStatsForUi : [];
-    const rmComunaStats = rmStatsForUi.map((c) => ({ comuna: c.comuna, count: c.count, plants: c.plants || [] }));
+    const rmComunaStats = rmStatsForUi.map((c) => ({ comuna: c.comuna, count: c.count }));
 
     res.json({
       key,
