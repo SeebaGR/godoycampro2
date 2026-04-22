@@ -369,78 +369,15 @@ router.get('/', async (req, res) => {
       console.warn('No se pudo obtener estadísticas GetAPI:', e.message);
     }
 
-    let topBrands = [];
-    try {
-      topBrands = await getTopBrands({
-        limit: 10,
-        okCount: totalProcesados
-      });
-    } catch (e) {
-      console.warn('No se pudo obtener TOP marcas:', e.message);
-    }
-
-    let rmStatsForUi = [];
-    let topComunas = [];
-    try {
-      rmStatsForUi = await getRmComunaStats({ okCount: totalProcesados });
-      topComunas = rmStatsForUi.slice(0, 10).map((x, idx) => ({ rank: idx + 1, comuna: x.comuna, count: x.count }));
-    } catch (e) {
-      console.warn('No se pudo obtener TOP comunas:', e.message);
-    }
+    const topBrands = [];
+    const rmStatsForUi = [];
+    const topComunas = [];
 
     const formatEsNumber = (n) => {
       const v = Number(n);
       if (!Number.isFinite(v)) return '0';
       return v.toLocaleString('es-CL');
     };
-
-    const topBrandsPills = Array.isArray(topBrands)
-      ? topBrands
-          .map((b) => {
-            const rank = Number(b?.rank) || 0;
-            const brand = escapeHtml(String(b?.brand ?? '').trim());
-            const count = formatEsNumber(b?.count);
-            return `<div class="brand-pill"><span class="brand-pill-rank">#${rank}</span><span class="brand-pill-name">${brand}</span><span class="brand-pill-count">${count}</span></div>`;
-          })
-          .join('')
-      : '';
-    const topBrandsMarquee = topBrandsPills ? topBrandsPills + topBrandsPills : '';
-
-    const maxBrandCount = Array.isArray(topBrands)
-      ? topBrands.reduce((m, b) => Math.max(m, Number(b?.count) || 0), 0)
-      : 0;
-
-    const topBrandsBars = Array.isArray(topBrands) && topBrands.length
-      ? topBrands
-          .map((b) => {
-            const rank = Number(b?.rank) || 0;
-            const brandRaw = String(b?.brand ?? '').trim();
-            const brand = escapeHtml(brandRaw);
-            const countNum = Number(b?.count) || 0;
-            const count = formatEsNumber(countNum);
-            const pct = maxBrandCount > 0 ? Math.max(0, Math.min(100, (countNum / maxBrandCount) * 100)) : 0;
-            return `<div class="brands-bar-row"><div class="brands-bar-rank">#${rank}</div><div class="brands-bar-name">${brand}</div><div class="brands-bar-track"><div class="brands-bar-fill" style="width:${pct.toFixed(2)}%"></div></div><div class="brands-bar-value">${count}</div></div>`;
-          })
-          .join('')
-      : '';
-
-    const maxComunaCount = Array.isArray(topComunas)
-      ? topComunas.reduce((m, c) => Math.max(m, Number(c?.count) || 0), 0)
-      : 0;
-
-    const topComunasBars = Array.isArray(topComunas) && topComunas.length
-      ? topComunas
-          .map((c) => {
-            const rank = Number(c?.rank) || 0;
-            const comunaRaw = String(c?.comuna ?? '').trim();
-            const comuna = escapeHtml(comunaRaw);
-            const countNum = Number(c?.count) || 0;
-            const count = formatEsNumber(countNum);
-            const pct = maxComunaCount > 0 ? Math.max(0, Math.min(100, (countNum / maxComunaCount) * 100)) : 0;
-            return `<div class="brands-bar-row"><div class="brands-bar-rank">#${rank}</div><div class="brands-bar-name">${comuna}</div><div class="brands-bar-track"><div class="brands-bar-fill" style="width:${pct.toFixed(2)}%"></div></div><div class="brands-bar-value">${count}</div></div>`;
-          })
-          .join('')
-      : '';
 
     // 3) Transitados Hoy (timestamp de vehicle_detections)
     let totalTransitadosHoy = 0;
@@ -536,11 +473,11 @@ router.get('/', async (req, res) => {
       </div>
       <div class="wide-container">
         <div class="brands-marquee" aria-label="Top marcas">
-          <div class="brands-marquee-track" data-animate="${topBrandsMarquee ? '1' : '0'}">
-            ${topBrandsMarquee || '<div class="brands-empty">Sin datos de marcas para mostrar.</div>'}
+          <div class="brands-marquee-track" id="topBrandsMarqueeTrack" data-animate="0">
+            <div class="brands-empty">Cargando marcas…</div>
           </div>
         </div>
-        ${topBrandsBars ? `<div class="brands-bars" aria-label="Gráfico top marcas">${topBrandsBars}</div>` : ''}
+        <div class="brands-bars" id="topBrandsBars" aria-label="Gráfico top marcas"></div>
       </div>
     </div>
       `
@@ -552,7 +489,9 @@ router.get('/', async (req, res) => {
         <h2>Ranking Planta Revisora por Comuna</h2>
       </div>
       <div class="wide-container">
-        ${topComunasBars ? `<div class="brands-bars" aria-label="Ranking comunas">${topComunasBars}</div>` : '<div class="brands-empty">Sin datos de comunas para mostrar.</div>'}
+        <div class="brands-bars" id="topComunasBars" aria-label="Ranking comunas">
+          <div class="brands-empty">Cargando comunas…</div>
+        </div>
       </div>
     </div>
       `
@@ -1227,7 +1166,7 @@ router.get('/', async (req, res) => {
     const totalPending = ${totalPendientes};
     const totalInvalidPlates = ${totalInvalidPlates};
     const totalTransitadosHoy = ${totalTransitadosHoy};
-    const rmComunaStats = ${JSON.stringify(rmStatsForUi.map(c => ({ comuna: c.comuna, count: c.count, plants: c.plants || [] })))};
+    let rmComunaStats = [];
 
     document.getElementById('totalVehicles').textContent = totalVehicles.toLocaleString('es-CL');
     const totalProcessedEl = document.getElementById('totalProcessed');
@@ -1239,6 +1178,95 @@ router.get('/', async (req, res) => {
     document.getElementById('todayVehicles').textContent = totalTransitadosHoy.toLocaleString('es-CL');
 
     function pad(num){ return String(num).padStart(2,'0'); }
+
+    const escapeHtml = (value) => {
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+    };
+
+    const formatEsNumber = (n) => {
+      const v = Number(n);
+      if (!Number.isFinite(v)) return '0';
+      return v.toLocaleString('es-CL');
+    };
+
+    function renderTopBrands(topBrands) {
+      const track = document.getElementById('topBrandsMarqueeTrack');
+      const barsEl = document.getElementById('topBrandsBars');
+      if (!track || !barsEl) return;
+      const list = Array.isArray(topBrands) ? topBrands : [];
+      if (list.length === 0) {
+        track.dataset.animate = '0';
+        track.innerHTML = '<div class="brands-empty">Sin datos de marcas para mostrar.</div>';
+        barsEl.innerHTML = '';
+        return;
+      }
+
+      const pills = list.map((b, i) => {
+        const rank = Number(b?.rank) || (i + 1);
+        const brand = escapeHtml(String(b?.brand ?? '').trim());
+        const count = formatEsNumber(b?.count);
+        return '<div class="brand-pill"><span class="brand-pill-rank">#' + rank + '</span><span class="brand-pill-name">' + brand + '</span><span class="brand-pill-count">' + count + '</span></div>';
+      }).join('');
+      const marquee = pills + pills;
+      track.dataset.animate = marquee ? '1' : '0';
+      track.innerHTML = marquee || '<div class="brands-empty">Sin datos de marcas para mostrar.</div>';
+
+      const maxCount = list.reduce((m, b) => Math.max(m, Number(b?.count) || 0), 0);
+      const bars = list.map((b, i) => {
+        const rank = Number(b?.rank) || (i + 1);
+        const brand = escapeHtml(String(b?.brand ?? '').trim());
+        const countNum = Number(b?.count) || 0;
+        const count = formatEsNumber(countNum);
+        const pct = maxCount > 0 ? Math.max(0, Math.min(100, (countNum / maxCount) * 100)) : 0;
+        return '<div class="brands-bar-row"><div class="brands-bar-rank">#' + rank + '</div><div class="brands-bar-name">' + brand + '</div><div class="brands-bar-track"><div class="brands-bar-fill" style="width:' + pct.toFixed(2) + '%"></div></div><div class="brands-bar-value">' + count + '</div></div>';
+      }).join('');
+      barsEl.innerHTML = bars;
+    }
+
+    function renderTopComunas(topComunas) {
+      const barsEl = document.getElementById('topComunasBars');
+      if (!barsEl) return;
+      const list = Array.isArray(topComunas) ? topComunas : [];
+      if (list.length === 0) {
+        barsEl.innerHTML = '<div class="brands-empty">Sin datos de comunas para mostrar.</div>';
+        return;
+      }
+      const maxCount = list.reduce((m, c) => Math.max(m, Number(c?.count) || 0), 0);
+      const bars = list.map((c, i) => {
+        const rank = Number(c?.rank) || (i + 1);
+        const comuna = escapeHtml(String(c?.comuna ?? '').trim());
+        const countNum = Number(c?.count) || 0;
+        const count = formatEsNumber(countNum);
+        const pct = maxCount > 0 ? Math.max(0, Math.min(100, (countNum / maxCount) * 100)) : 0;
+        return '<div class="brands-bar-row"><div class="brands-bar-rank">#' + rank + '</div><div class="brands-bar-name">' + comuna + '</div><div class="brands-bar-track"><div class="brands-bar-fill" style="width:' + pct.toFixed(2) + '%"></div></div><div class="brands-bar-value">' + count + '</div></div>';
+      }).join('');
+      barsEl.innerHTML = bars;
+    }
+
+    const homeStatsPromise = (async () => {
+      try {
+        const response = await fetch('/home/stats', { cache: 'no-store' });
+        if (!response.ok) throw new Error('No se pudo cargar estadísticas de Home');
+        const payload = await response.json();
+        const topBrands = Array.isArray(payload?.topBrands) ? payload.topBrands : [];
+        const topComunas = Array.isArray(payload?.topComunas) ? payload.topComunas : [];
+        rmComunaStats = Array.isArray(payload?.rmComunaStats) ? payload.rmComunaStats : [];
+        renderTopBrands(topBrands);
+        renderTopComunas(topComunas);
+        return payload;
+      } catch (e) {
+        console.error(e);
+        renderTopBrands([]);
+        renderTopComunas([]);
+        rmComunaStats = [];
+        return null;
+      }
+    })();
 
     async function fetchHourlyData(date) {
       const response = await fetch('/home/hourly?date=' + encodeURIComponent(date));
@@ -1336,9 +1364,10 @@ router.get('/', async (req, res) => {
     document.getElementById('selectedDate').value = initialDate;
     loadHourly();
 
-    (function initRMMap() {
+    (async function initRMMap() {
       const el = document.getElementById('mapRM');
       if (!el || typeof L === 'undefined') return;
+      await homeStatsPromise.catch(() => null);
       const map = L.map(el).setView([-33.45, -70.66], 11);
       L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
         maxZoom: 18,
@@ -1451,6 +1480,226 @@ router.get('/', async (req, res) => {
   } catch (error) {
     console.error('Error en /home:', error);
     res.status(500).send('Error al cargar la página');
+  }
+});
+
+router.get('/stats', async (req, res) => {
+  try {
+    const limitBrands = Math.min(50, Math.max(1, Number.parseInt(req.query?.brands_limit ?? '10', 10) || 10));
+    const limitComunas = Math.min(50, Math.max(1, Number.parseInt(req.query?.comunas_limit ?? '10', 10) || 10));
+
+    const ttlBrandsMs = Math.max(0, Number.parseInt(process.env.HOME_TOP_BRANDS_TTL_MS ?? '300000', 10) || 300000);
+    const ttlRmMs = Math.max(0, Number.parseInt(process.env.HOME_RM_STATS_TTL_MS ?? '300000', 10) || 300000);
+    const now = Date.now();
+
+    const brandsFresh = ttlBrandsMs > 0 && Array.isArray(topBrandsCache.data) && topBrandsCache.data.length && (now - topBrandsCache.atMs < ttlBrandsMs);
+    const rmFresh = ttlRmMs > 0 && Array.isArray(rmStatsCache.data) && rmStatsCache.data.length && (now - rmStatsCache.atMs < ttlRmMs);
+
+    if (brandsFresh && rmFresh) {
+      const rm = rmStatsCache.data;
+      return res.json({
+        cached: true,
+        topBrands: topBrandsCache.data.slice(0, limitBrands),
+        topComunas: rm.slice(0, limitComunas).map((x, idx) => ({ rank: idx + 1, comuna: x.comuna, count: x.count })),
+        rmComunaStats: rm.map((c) => ({ comuna: c.comuna, count: c.count, plants: Array.isArray(c.plants) ? c.plants : [] }))
+      });
+    }
+
+    const safeJsonParse = (value) => {
+      if (value == null) return null;
+      if (typeof value === 'object') return value;
+      if (typeof value !== 'string') return null;
+      try {
+        return JSON.parse(value);
+      } catch {
+        return null;
+      }
+    };
+
+    const pickDisplayText = (value) => {
+      if (value == null) return null;
+      if (typeof value === 'string') return value.trim() || null;
+      if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+      if (typeof value === 'object') {
+        const name = typeof value.name === 'string' ? value.name.trim() : '';
+        if (name) return name;
+        const title = typeof value.title === 'string' ? value.title.trim() : '';
+        if (title) return title;
+      }
+      return null;
+    };
+
+    const unwrapGetApiEnvelope = (value) => {
+      if (!value || typeof value !== 'object') return value;
+      if ('data' in value && value.data && typeof value.data === 'object') {
+        const hasMeta = value.success === true || typeof value.status === 'number' || typeof value.ok === 'boolean';
+        const looksLikeVehicle = typeof value.data.licensePlate === 'string' || typeof value.data.vinNumber === 'string' || typeof value.data.engineNumber === 'string';
+        const looksLikeAppraisal = typeof value.data.vehicleId === 'string' || typeof value.data.vehicleId === 'number' || value.data.precioUsado || value.data.precio_usado;
+        if (hasMeta || looksLikeVehicle || looksLikeAppraisal) return value.data;
+      }
+      return value;
+    };
+
+    const normalizeGetApiPayload = (value) => {
+      const base = unwrapGetApiEnvelope(value);
+      if (!base || typeof base !== 'object') return null;
+      const next = { ...base };
+      if (next.vehicle && typeof next.vehicle === 'object') {
+        const v = unwrapGetApiEnvelope(next.vehicle);
+        next.vehicle = v;
+        if (v && typeof v === 'object' && v.model && typeof v.model === 'object') {
+          next.vehicle = { ...v, model: unwrapGetApiEnvelope(v.model) };
+        }
+      }
+      if (next.appraisal && typeof next.appraisal === 'object') {
+        const a = unwrapGetApiEnvelope(next.appraisal);
+        next.appraisal = a;
+        if (a && typeof a === 'object' && a.vehicle && typeof a.vehicle === 'object') {
+          next.appraisal = { ...a, vehicle: unwrapGetApiEnvelope(a.vehicle) };
+        }
+      }
+      return next;
+    };
+
+    const extractBrand = (row) => {
+      if (!row || typeof row !== 'object') return null;
+      const payloadCandidates = [row.getapi, row.payload, row.data, row.result, row.response, row.json];
+      const rawPayload = payloadCandidates.map(safeJsonParse).find((x) => x && typeof x === 'object') || null;
+      const payload = normalizeGetApiPayload(rawPayload);
+      const vehicle = payload?.vehicle && typeof payload.vehicle === 'object'
+        ? payload.vehicle
+        : (row.vehicle && typeof row.vehicle === 'object' ? unwrapGetApiEnvelope(row.vehicle) : null);
+      const brand =
+        pickDisplayText(vehicle?.brand?.name) ||
+        pickDisplayText(vehicle?.brand) ||
+        pickDisplayText(vehicle?.model?.brand?.name) ||
+        pickDisplayText(vehicle?.model?.brand) ||
+        null;
+      if (!brand) return null;
+      return brand.toUpperCase().replace(/\s+/g, ' ').trim();
+    };
+
+    const extractComuna = (row) => {
+      if (!row || typeof row !== 'object') return null;
+      const payloadCandidates = [row.getapi, row.payload, row.data, row.result, row.response, row.json];
+      const rawPayload = payloadCandidates.map(safeJsonParse).find((x) => x && typeof x === 'object') || null;
+      const payload = normalizeGetApiPayload(rawPayload);
+      const vehicle = payload?.vehicle && typeof payload.vehicle === 'object'
+        ? payload.vehicle
+        : (row.vehicle && typeof row.vehicle === 'object' ? unwrapGetApiEnvelope(row.vehicle) : null);
+      const comuna =
+        pickDisplayText(vehicle?.plantaRevisora?.comuna) ||
+        pickDisplayText(vehicle?.planta_revisora?.comuna) ||
+        null;
+      if (!comuna) return null;
+      return comuna.toUpperCase().replace(/\s+/g, ' ').trim();
+    };
+
+    const extractPlanta = (row) => {
+      if (!row || typeof row !== 'object') return null;
+      const payloadCandidates = [row.getapi, row.payload, row.data, row.result, row.response, row.json];
+      const rawPayload = payloadCandidates.map(safeJsonParse).find((x) => x && typeof x === 'object') || null;
+      const payload = normalizeGetApiPayload(rawPayload);
+      const vehicle = payload?.vehicle && typeof payload.vehicle === 'object'
+        ? payload.vehicle
+        : (row.vehicle && typeof row.vehicle === 'object' ? unwrapGetApiEnvelope(row.vehicle) : null);
+      const pr = vehicle?.plantaRevisora && typeof vehicle.plantaRevisora === 'object' ? vehicle.plantaRevisora : null;
+      if (!pr) return null;
+      const name = pickDisplayText(pr?.concesionPlantaRevisora) || pickDisplayText(pr?.concesion_planta_revisora);
+      const cod = pickDisplayText(pr?.codPrt) || pickDisplayText(pr?.cod_prt);
+      const pretty = (cod && name) ? (cod + ' · ' + name) : (name || cod);
+      if (!pretty) return null;
+      return String(pretty).toUpperCase().replace(/\s+/g, ' ').trim();
+    };
+
+    const maxScanBrands = Math.max(1000, Number.parseInt(process.env.HOME_TOP_BRANDS_MAX_SCAN ?? '30000', 10) || 30000);
+    const maxScanRm = Math.max(1000, Number.parseInt(process.env.HOME_RM_STATS_MAX_SCAN ?? '30000', 10) || 30000);
+    const scanLimit = Math.max(maxScanBrands, maxScanRm);
+    const pageSize = 100;
+    const concurrency = Math.min(10, Math.max(1, Number.parseInt(process.env.HOME_GETAPI_SCAN_CONCURRENCY ?? '4', 10) || 4));
+    const budgetMs = Math.max(500, Number.parseInt(process.env.HOME_GETAPI_SCAN_TIME_BUDGET_MS ?? '8000', 10) || 8000);
+    const startedAt = Date.now();
+
+    const brandCounts = new Map();
+    const comunaCounts = new Map();
+    const plantsByComuna = new Map();
+
+    let fetched = 0;
+    let page = 1;
+    let hasMore = true;
+
+    while (hasMore && fetched < scanLimit && (Date.now() - startedAt) < budgetMs) {
+      const basePage = page;
+      const pages = Array.from({ length: concurrency }, (_, i) => basePage + i);
+      const results = await Promise.all(
+        pages.map((p) => directus.listGetApiPage({ page: p, limit: pageSize, onlySuccess: true }).catch((e) => ({ error: e })))
+      );
+
+      let processedPages = 0;
+      for (let i = 0; i < results.length; i += 1) {
+        const result = results[i];
+        if (result?.error) throw result.error;
+        const rows = Array.isArray(result?.data) ? result.data : [];
+        processedPages += 1;
+        for (const row of rows) {
+          const brand = extractBrand(row);
+          if (brand) brandCounts.set(brand, (brandCounts.get(brand) || 0) + 1);
+
+          const comuna = extractComuna(row);
+          if (comuna) {
+            comunaCounts.set(comuna, (comunaCounts.get(comuna) || 0) + 1);
+            const planta = extractPlanta(row);
+            if (planta) {
+              const current = plantsByComuna.get(comuna) || new Map();
+              current.set(planta, (current.get(planta) || 0) + 1);
+              plantsByComuna.set(comuna, current);
+            }
+          }
+
+          fetched += 1;
+          if (fetched >= scanLimit) break;
+          if ((Date.now() - startedAt) >= budgetMs) break;
+        }
+
+        const resultHasMore = Boolean(result?.pagination?.hasMore);
+        if (!resultHasMore || rows.length === 0 || fetched >= scanLimit || (Date.now() - startedAt) >= budgetMs) {
+          hasMore = resultHasMore && rows.length > 0 && fetched < scanLimit && (Date.now() - startedAt) < budgetMs;
+          break;
+        }
+      }
+
+      page = basePage + processedPages;
+    }
+
+    const computedBrands = Array.from(brandCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([brand, count], idx) => ({ rank: idx + 1, brand, count }));
+
+    const computedRm = Array.from(comunaCounts.entries())
+      .map(([comuna, count]) => {
+        const plantsMap = plantsByComuna.get(comuna) || new Map();
+        const plants = Array.from(plantsMap.entries())
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 3)
+          .map(([name, c]) => ({ name, count: c }));
+        return { comuna, count, plants };
+      })
+      .sort((a, b) => b.count - a.count);
+
+    topBrandsCache = { atMs: Date.now(), okCount: null, data: computedBrands };
+    rmStatsCache = { atMs: Date.now(), okCount: null, data: computedRm };
+
+    return res.json({
+      cached: false,
+      partial: fetched < scanLimit && (Date.now() - startedAt) >= budgetMs,
+      scanned: fetched,
+      topBrands: computedBrands.slice(0, limitBrands),
+      topComunas: computedRm.slice(0, limitComunas).map((x, idx) => ({ rank: idx + 1, comuna: x.comuna, count: x.count })),
+      rmComunaStats: computedRm.map((c) => ({ comuna: c.comuna, count: c.count, plants: Array.isArray(c.plants) ? c.plants : [] }))
+    });
+  } catch (error) {
+    console.error('Error en /home/stats:', error);
+    res.status(500).json({ error: 'No se pudo obtener estadísticas de Home' });
   }
 });
 

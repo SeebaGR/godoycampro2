@@ -189,11 +189,15 @@ async function getGetApiStats() {
   const counts = {};
   for (const s of statusValues) counts[s] = 0;
 
-  const total = await countItems(collection);
-  for (const s of statusValues) {
-    counts[s] = await countItems(collection, { [`filter[status][_eq]`]: s });
-  }
-  const attemptsSum = await sumItemsField(collection, 'attempts');
+  const [total, attemptsSum, ...statusCounts] = await Promise.all([
+    countItems(collection),
+    sumItemsField(collection, 'attempts'),
+    ...statusValues.map((s) => countItems(collection, { [`filter[status][_eq]`]: s }))
+  ]);
+  statusValues.forEach((s, idx) => {
+    const n = Number(statusCounts[idx]);
+    counts[s] = Number.isFinite(n) ? n : 0;
+  });
 
   const minCalls = attemptsSum;
   const estimatedCalls = attemptsSum + counts.ok;
