@@ -1,0 +1,81 @@
+{
+    "plate": "BJTH99",
+    "fetched_at": "2026-04-02T17:28:25.450Z",
+    "vehicle": {
+        "id": "935082",
+        "licensePlate": "BJTH99",
+        "dvLicensePlate": "5",
+        "modelId": "47255",
+        "version": "1.6 EX SALOON STD COLOR MT",
+        "mileage": null,
+        "color": "NEGRO GRIS",
+        "year": 2009,
+        "codeSii": null,
+        "vinNumber": "3N1EB31S7ZK739165",
+        "engineNumber": "GA16826558W",
+        "engine": null,
+        "fuel": "BENCINA",
+        "transmission": "MECANICA",
+        "doors": 4,
+        "urlImage": "",
+        "model": {
+            "id": "47255",
+            "name": "V16",
+            "typeVehicle": {
+                "name": "AUTOMOVIL"
+            },
+            "brand": {
+                "name": "NISSAN"
+            }
+        },
+        "monthRT": "Enero",
+        "_isPro": true,
+        "brand": {
+            "name": "NISSAN"
+        }
+    },
+    "appraisal": {
+        "vehicleId": "935082",
+        "informacionFiscal": {
+            "codigo": "NA",
+            "permiso": "-1",
+            "tasacion": 0,
+            "ano_info_fiscal": 0
+        },
+        "precioUsado": {
+            "precio": 1570000,
+            "banda_max": 1624950,
+            "banda_min": 1515050
+        },
+        "precioRetoma": 1186449,
+        "vehicle": {
+            "id": "935082",
+            "licensePlate": "BJTH99",
+            "dvLicensePlate": "5",
+            "modelId": "47255",
+            "version": "1.6 EX SALOON STD COLOR MT",
+            "mileage": null,
+            "color": "NEGRO GRIS",
+            "year": 2009,
+            "codeSii": null,
+            "vinNumber": "3N1EB31S7ZK739165",
+            "engineNumber": "GA16826558W",
+            "engine": null,
+            "fuel": "BENCINA",
+            "transmission": "MECANICA",
+            "doors": 4,
+            "urlImage": "",
+            "model": {
+                "id": "47255",
+                "name": "V16",
+                "typeVehicle": {
+                    "name": "AUTOMOVIL"
+                },
+                "brand": {
+                    "name": "NISSAN"
+                }
+            },
+            "monthRT": "Enero"
+        }
+    }
+}

@@ -279,6 +279,14 @@ async function resolveGetApiSchema() {
   }
 }
 
+async function resolveGetApiSchemaRelaxed() {
+  const schema = await resolveGetApiSchema();
+  if (!schema || !schema.collection) return null;
+  const hasAnyPayloadField = Boolean(schema.payloadField || schema.vehicleField || schema.appraisalField);
+  if (!hasAnyPayloadField) return null;
+  return { ...schema, ok: true };
+}
+
 async function listDetections({ page, limit, license_plate, start_date, end_date, processed } = {}) {
   const { collection } = getDirectusConfig();
   const safePage = Math.max(1, Number.parseInt(page ?? '1', 10) || 1);
@@ -468,7 +476,7 @@ async function updateItem(collection, id, patch) {
 }
 
 async function getLatestGetApiCursor({ onlySuccess } = {}) {
-  const schema = await resolveGetApiSchema();
+  const schema = await resolveGetApiSchemaRelaxed();
   if (!schema?.ok) return null;
   const statusField = schema.statusField || 'status';
   const fetchedAtField = schema.fetchedAtField || null;
@@ -505,7 +513,7 @@ async function getLatestGetApiCursor({ onlySuccess } = {}) {
 }
 
 async function listGetApiAfter({ afterAt, afterId, limit, onlySuccess } = {}) {
-  const schema = await resolveGetApiSchema();
+  const schema = await resolveGetApiSchemaRelaxed();
   if (!schema?.ok) return [];
   const safeLimit = Math.min(500, Math.max(1, Number.parseInt(limit ?? '200', 10) || 200));
   const statusField = schema.statusField || 'status';

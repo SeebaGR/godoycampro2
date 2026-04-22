@@ -1674,6 +1674,7 @@ router.get('/stats', async (req, res) => {
       if (!Number.isFinite(Number(next.ok_processed))) next.ok_processed = 0;
       if (!Number.isFinite(Number(next.ok_total))) next.ok_total = 0;
       if (typeof next.updated_at !== 'string') next.updated_at = null;
+      if (next.last_error != null && typeof next.last_error !== 'object') next.last_error = null;
       return next;
     };
 
@@ -1692,7 +1693,10 @@ router.get('/stats', async (req, res) => {
     const readStatsRow = async () => {
       const query = { limit: 1, [`filter[${statsKeyField}][_eq]`]: statsKeyValue };
       const rows = await directus.listItems(statsCollection, query);
-      return rows[0] || null;
+      const found = rows[0] || null;
+      if (found) return found;
+      const rowsAny = await directus.listItems(statsCollection, { limit: 1 });
+      return rowsAny[0] || null;
     };
 
     const computeUi = (data) => {
@@ -1759,39 +1763,48 @@ router.get('/stats', async (req, res) => {
 
           const startedAt = Date.now();
           let advanced = 0;
-          while ((Date.now() - startedAt) < stepBudgetMs) {
-            const afterAt = typeof data?.cursor?.at === 'string' ? data.cursor.at : null;
-            const afterId = data?.cursor?.id != null ? Number(data.cursor.id) : null;
-            const rows = await directus.listGetApiAfter({ afterAt, afterId, limit: batchSize, onlySuccess: true });
-            if (!Array.isArray(rows) || rows.length === 0) break;
+          try {
+            while ((Date.now() - startedAt) < stepBudgetMs) {
+              const afterAt = typeof data?.cursor?.at === 'string' ? data.cursor.at : null;
+              const afterId = data?.cursor?.id != null ? Number(data.cursor.id) : null;
+              const rows = await directus.listGetApiAfter({ afterAt, afterId, limit: batchSize, onlySuccess: true });
+              if (!Array.isArray(rows) || rows.length === 0) break;
 
-            for (const r of rows) {
-              const brand = extractBrand(r);
-              if (brand) data.brands[brand] = (Number(data.brands[brand]) || 0) + 1;
+              for (const r of rows) {
+                const brand = extractBrand(r);
+                if (brand) data.brands[brand] = (Number(data.brands[brand]) || 0) + 1;
 
-              const comuna = extractComuna(r);
-              if (comuna) {
-                data.comunas[comuna] = (Number(data.comunas[comuna]) || 0) + 1;
-                const planta = extractPlanta(r);
-                if (planta) {
-                  const current = data.plants[comuna] && typeof data.plants[comuna] === 'object' ? data.plants[comuna] : {};
-                  current[planta] = (Number(current[planta]) || 0) + 1;
-                  data.plants[comuna] = current;
+                const comuna = extractComuna(r);
+                if (comuna) {
+                  data.comunas[comuna] = (Number(data.comunas[comuna]) || 0) + 1;
+                  const planta = extractPlanta(r);
+                  if (planta) {
+                    const current = data.plants[comuna] && typeof data.plants[comuna] === 'object' ? data.plants[comuna] : {};
+                    current[planta] = (Number(current[planta]) || 0) + 1;
+                    data.plants[comuna] = current;
+                  }
                 }
+
+                const idNum = r?.id != null ? Number(r.id) : null;
+                if (Number.isFinite(idNum)) data.cursor.id = idNum;
+
+                if (cursorField && typeof r?.[cursorField] === 'string' && r[cursorField]) {
+                  data.cursor.at = r[cursorField];
+                }
+
+                data.ok_processed = (Number(data.ok_processed) || 0) + 1;
+                advanced += 1;
               }
 
-              const idNum = r?.id != null ? Number(r.id) : null;
-              if (Number.isFinite(idNum)) data.cursor.id = idNum;
-
-              if (cursorField && typeof r?.[cursorField] === 'string' && r[cursorField]) {
-                data.cursor.at = r[cursorField];
-              }
-
-              data.ok_processed = (Number(data.ok_processed) || 0) + 1;
-              advanced += 1;
+              if ((Date.now() - startedAt) >= stepBudgetMs) break;
             }
-
-            if ((Date.now() - startedAt) >= stepBudgetMs) break;
+            data.last_error = null;
+          } catch (e) {
+            data.last_error = {
+              at: nowIso(),
+              status: e?.status ?? null,
+              message: e?.message || String(e)
+            };
           }
 
           data.updated_at = nowIso();
@@ -1896,6 +1909,7 @@ router.get('/stats', async (req, res) => {
       okTotal: Number(data.ok_total) || 0,
       okProcessed: Number(data.ok_processed) || 0,
       updatedAt: typeof data.updated_at === 'string' ? data.updated_at : null,
+      lastError: data.last_error && typeof data.last_error === 'object' ? data.last_error : null,
       topBrands: ui.topBrands,
       topComunas: ui.topComunas,
       rmComunaStats: ui.rmComunaStats
