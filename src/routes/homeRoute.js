@@ -182,8 +182,15 @@ router.get('/', async (req, res) => {
         ? payload.vehicle
         : (row.vehicle && typeof row.vehicle === 'object' ? unwrapGetApiEnvelope(row.vehicle) : null);
 
+      const pr = vehicle?.plantaRevisora && typeof vehicle.plantaRevisora === 'object' ? vehicle.plantaRevisora : null;
+      const rtPlant = vehicle?.rtPlant && typeof vehicle.rtPlant === 'object' ? vehicle.rtPlant : null;
+
       const comuna =
-        pickDisplayText(vehicle?.plantaRevisora?.comuna) ||
+        pickDisplayText(vehicle?.rtCommune) ||
+        pickDisplayText(vehicle?.rtComuna) ||
+        pickDisplayText(rtPlant?.comuna) ||
+        pickDisplayText(rtPlant?.commune) ||
+        pickDisplayText(pr?.comuna) ||
         pickDisplayText(vehicle?.planta_revisora?.comuna) ||
         null;
 
@@ -208,9 +215,30 @@ router.get('/', async (req, res) => {
         : (row.vehicle && typeof row.vehicle === 'object' ? unwrapGetApiEnvelope(row.vehicle) : null);
 
       const pr = vehicle?.plantaRevisora && typeof vehicle.plantaRevisora === 'object' ? vehicle.plantaRevisora : null;
-      if (!pr) return null;
-      const name = pickDisplayText(pr?.concesionPlantaRevisora) || pickDisplayText(pr?.concesion_planta_revisora);
-      const cod = pickDisplayText(pr?.codPrt) || pickDisplayText(pr?.cod_prt);
+      const rtPlant = vehicle?.rtPlant && typeof vehicle.rtPlant === 'object' ? vehicle.rtPlant : null;
+      const rtStation = vehicle?.rtStation && typeof vehicle.rtStation === 'object' ? vehicle.rtStation : null;
+
+      const name =
+        pickDisplayText(rtPlant?.name) ||
+        pickDisplayText(vehicle?.rtPlantName) ||
+        pickDisplayText(pr?.concesionPlantaRevisora) ||
+        pickDisplayText(pr?.concesion_planta_revisora) ||
+        pickDisplayText(pr?.name) ||
+        pickDisplayText(pr?.nombre) ||
+        pickDisplayText(vehicle?.plantaRevisora) ||
+        pickDisplayText(rtStation?.name) ||
+        pickDisplayText(vehicle?.rtStationName) ||
+        pickDisplayText(vehicle?.rtCompany) ||
+        null;
+
+      const cod =
+        pickDisplayText(pr?.codPrt) ||
+        pickDisplayText(pr?.cod_prt) ||
+        pickDisplayText(rtPlant?.codPrt) ||
+        pickDisplayText(rtPlant?.cod_prt) ||
+        pickDisplayText(rtPlant?.code) ||
+        null;
+
       const pretty = (cod && name) ? (cod + ' · ' + name) : (name || cod);
       if (!pretty) return null;
       return String(pretty).toUpperCase().replace(/\s+/g, ' ').trim();
@@ -1633,8 +1661,14 @@ router.get('/stats', async (req, res) => {
       const vehicle = payload?.vehicle && typeof payload.vehicle === 'object'
         ? payload.vehicle
         : (row.vehicle && typeof row.vehicle === 'object' ? unwrapGetApiEnvelope(row.vehicle) : null);
+      const pr = vehicle?.plantaRevisora && typeof vehicle.plantaRevisora === 'object' ? vehicle.plantaRevisora : null;
+      const rtPlant = vehicle?.rtPlant && typeof vehicle.rtPlant === 'object' ? vehicle.rtPlant : null;
       const comuna =
-        pickDisplayText(vehicle?.plantaRevisora?.comuna) ||
+        pickDisplayText(vehicle?.rtCommune) ||
+        pickDisplayText(vehicle?.rtComuna) ||
+        pickDisplayText(rtPlant?.comuna) ||
+        pickDisplayText(rtPlant?.commune) ||
+        pickDisplayText(pr?.comuna) ||
         pickDisplayText(vehicle?.planta_revisora?.comuna) ||
         null;
       if (!comuna) return null;
@@ -1650,9 +1684,30 @@ router.get('/stats', async (req, res) => {
         ? payload.vehicle
         : (row.vehicle && typeof row.vehicle === 'object' ? unwrapGetApiEnvelope(row.vehicle) : null);
       const pr = vehicle?.plantaRevisora && typeof vehicle.plantaRevisora === 'object' ? vehicle.plantaRevisora : null;
-      if (!pr) return null;
-      const name = pickDisplayText(pr?.concesionPlantaRevisora) || pickDisplayText(pr?.concesion_planta_revisora);
-      const cod = pickDisplayText(pr?.codPrt) || pickDisplayText(pr?.cod_prt);
+      const rtPlant = vehicle?.rtPlant && typeof vehicle.rtPlant === 'object' ? vehicle.rtPlant : null;
+      const rtStation = vehicle?.rtStation && typeof vehicle.rtStation === 'object' ? vehicle.rtStation : null;
+
+      const name =
+        pickDisplayText(rtPlant?.name) ||
+        pickDisplayText(vehicle?.rtPlantName) ||
+        pickDisplayText(pr?.concesionPlantaRevisora) ||
+        pickDisplayText(pr?.concesion_planta_revisora) ||
+        pickDisplayText(pr?.name) ||
+        pickDisplayText(pr?.nombre) ||
+        pickDisplayText(vehicle?.plantaRevisora) ||
+        pickDisplayText(rtStation?.name) ||
+        pickDisplayText(vehicle?.rtStationName) ||
+        pickDisplayText(vehicle?.rtCompany) ||
+        null;
+
+      const cod =
+        pickDisplayText(pr?.codPrt) ||
+        pickDisplayText(pr?.cod_prt) ||
+        pickDisplayText(rtPlant?.codPrt) ||
+        pickDisplayText(rtPlant?.cod_prt) ||
+        pickDisplayText(rtPlant?.code) ||
+        null;
+
       const pretty = (cod && name) ? (cod + ' · ' + name) : (name || cod);
       if (!pretty) return null;
       return String(pretty).toUpperCase().replace(/\s+/g, ' ').trim();
