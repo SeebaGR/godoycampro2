@@ -473,12 +473,31 @@ async function getLatestGetApiCursor({ onlySuccess } = {}) {
   const statusField = schema.statusField || 'status';
   const fetchedAtField = schema.fetchedAtField || null;
 
-  const sort = fetchedAtField ? `-${fetchedAtField},-id` : '-id';
-  const fields = fetchedAtField ? `id,${fetchedAtField},${statusField}` : `id,${statusField}`;
-  const query = { limit: 1, sort, fields };
-  if (onlySuccess) query[`filter[${statusField}][_eq]`] = 'ok';
-  const rows = await listItems(schema.collection, query);
-  const row = rows[0] || null;
+  const runQuery = async ({ sort, fields }) => {
+    const query = { limit: 1, sort, fields };
+    if (onlySuccess) query[`filter[${statusField}][_eq]`] = 'ok';
+    const rows = await listItems(schema.collection, query);
+    return rows[0] || null;
+  };
+
+  const primarySort = fetchedAtField ? `-${fetchedAtField},-id` : '-id';
+  const primaryFields = fetchedAtField ? `id,${fetchedAtField},${statusField}` : `id,${statusField}`;
+
+  let row = null;
+  try {
+    row = await runQuery({ sort: primarySort, fields: primaryFields });
+  } catch {
+    row = null;
+  }
+
+  if (!row) {
+    try {
+      row = await runQuery({ sort: '-id', fields: `id,${statusField}` });
+    } catch {
+      row = null;
+    }
+  }
+
   if (!row) return null;
   const id = row?.id != null ? Number(row.id) : null;
   const at = fetchedAtField && typeof row?.[fetchedAtField] === 'string' ? row[fetchedAtField] : null;
@@ -531,9 +550,24 @@ async function listGetApiAfter({ afterAt, afterId, limit, onlySuccess } = {}) {
     const status = e?.status ?? null;
     const retrySpecific = status === 400 || status === 403;
     if (!retrySpecific) throw e;
-    const query2 = { ...query };
-    delete query2.fields;
-    payload = await directusRequest('GET', `/items/${encodeURIComponent(schema.collection)}`, { query: query2 });
+    try {
+      const query2 = { ...query };
+      delete query2.fields;
+      payload = await directusRequest('GET', `/items/${encodeURIComponent(schema.collection)}`, { query: query2 });
+    } catch (e2) {
+      const status2 = e2?.status ?? null;
+      const retrySpecific2 = status2 === 400 || status2 === 403;
+      if (!retrySpecific2) throw e2;
+
+      const query3 = {
+        limit: safeLimit,
+        sort: 'id'
+      };
+      if (onlySuccess) query3[`filter[${statusField}][_eq]`] = 'ok';
+      if (hasAfterId) query3['filter[id][_gt]'] = String(afterIdNum);
+
+      payload = await directusRequest('GET', `/items/${encodeURIComponent(schema.collection)}`, { query: query3 });
+    }
   }
   return Array.isArray(payload?.data) ? payload.data : [];
 }
