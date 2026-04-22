@@ -446,6 +446,98 @@ async function listGetApiPage({ page, limit, onlySuccess } = {}) {
   };
 }
 
+async function listItems(collection, query) {
+  const payload = await directusRequest('GET', `/items/${encodeURIComponent(collection)}`, { query: query || {} });
+  return Array.isArray(payload?.data) ? payload.data : [];
+}
+
+async function createItem(collection, data) {
+  const payload = await directusRequest('POST', `/items/${encodeURIComponent(collection)}`, {
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data || {})
+  });
+  return payload?.data || null;
+}
+
+async function updateItem(collection, id, patch) {
+  const payload = await directusRequest('PATCH', `/items/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`, {
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch || {})
+  });
+  return payload?.data || null;
+}
+
+async function getLatestGetApiCursor({ onlySuccess } = {}) {
+  const schema = await resolveGetApiSchema();
+  if (!schema?.ok) return null;
+  const statusField = schema.statusField || 'status';
+  const fetchedAtField = schema.fetchedAtField || null;
+
+  const sort = fetchedAtField ? `-${fetchedAtField},-id` : '-id';
+  const fields = fetchedAtField ? `id,${fetchedAtField},${statusField}` : `id,${statusField}`;
+  const query = { limit: 1, sort, fields };
+  if (onlySuccess) query[`filter[${statusField}][_eq]`] = 'ok';
+  const rows = await listItems(schema.collection, query);
+  const row = rows[0] || null;
+  if (!row) return null;
+  const id = row?.id != null ? Number(row.id) : null;
+  const at = fetchedAtField && typeof row?.[fetchedAtField] === 'string' ? row[fetchedAtField] : null;
+  return { id: Number.isFinite(id) ? id : null, at, field: fetchedAtField };
+}
+
+async function listGetApiAfter({ afterAt, afterId, limit, onlySuccess } = {}) {
+  const schema = await resolveGetApiSchema();
+  if (!schema?.ok) return [];
+  const safeLimit = Math.min(500, Math.max(1, Number.parseInt(limit ?? '200', 10) || 200));
+  const statusField = schema.statusField || 'status';
+  const fetchedAtField = schema.fetchedAtField || null;
+
+  const hasAnyPayloadField = Boolean(schema.payloadField || schema.vehicleField || schema.appraisalField);
+  const fields = hasAnyPayloadField
+    ? ['id', schema.detectionField, schema.payloadField, schema.vehicleField, schema.appraisalField, schema.plateField, schema.fetchedAtField, schema.statusField, schema.attemptsField, schema.nextRetryAtField, schema.upstreamStatusField, schema.reasonField, schema.messageField].filter(Boolean).join(',')
+    : '*';
+
+  const query = {
+    limit: safeLimit,
+    fields
+  };
+
+  if (fetchedAtField) {
+    query.sort = `${fetchedAtField},id`;
+  } else {
+    query.sort = 'id';
+  }
+
+  if (onlySuccess) query[`filter[${statusField}][_eq]`] = 'ok';
+
+  const afterIdNum = afterId != null ? Number(afterId) : null;
+  const hasAfterId = Number.isFinite(afterIdNum) && afterIdNum >= 0;
+  const afterAtStr = typeof afterAt === 'string' && afterAt.trim() ? afterAt.trim() : null;
+
+  if (fetchedAtField && afterAtStr && hasAfterId) {
+    query[`filter[_or][0][${fetchedAtField}][_gt]`] = afterAtStr;
+    query[`filter[_or][1][_and][0][${fetchedAtField}][_eq]`] = afterAtStr;
+    query[`filter[_or][1][_and][1][id][_gt]`] = String(afterIdNum);
+  } else if (fetchedAtField && afterAtStr) {
+    query[`filter[${fetchedAtField}][_gt]`] = afterAtStr;
+  } else if (!fetchedAtField && hasAfterId) {
+    query['filter[id][_gt]'] = String(afterIdNum);
+  }
+
+  let payload;
+  try {
+    payload = await directusRequest('GET', `/items/${encodeURIComponent(schema.collection)}`, { query });
+  } catch (e) {
+    const status = e?.status ?? null;
+    const retrySpecific = status === 400 || status === 403;
+    if (!retrySpecific) throw e;
+    const query2 = { ...query };
+    delete query2.fields;
+    payload = await directusRequest('GET', `/items/${encodeURIComponent(schema.collection)}`, { query: query2 });
+  }
+  return Array.isArray(payload?.data) ? payload.data : [];
+}
+
 async function upsertGetApiByDetectionId(detectionId, getapiPayload, meta) {
   const schema = await resolveGetApiSchema();
   if (!schema?.ok) return null;
@@ -686,14 +778,20 @@ async function uploadImageBytes(bytes, { contentType, filename, title } = {}) {
 module.exports = {
   getDirectusConfig,
   getDirectusGetApiCollection,
+  directusRequest,
   countItems,
   getGetApiStats,
   listDetections,
   listDetectionsMissingGetApi,
   listDetectionsWithGetApi,
   listDetectionsByIds,
+  listItems,
+  createItem,
+  updateItem,
   listGetApiByDetectionIds,
   listGetApiPage,
+  listGetApiAfter,
+  getLatestGetApiCursor,
   upsertGetApiByDetectionId,
   listGetApiRetryQueue,
   getDetectionById,
